@@ -1,0 +1,20 @@
+{
+  "name": "scraft-glass",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "pnpm --parallel --filter \"./app/*\" dev",
+    "build": "pnpm --filter web build",
+    "start": "pnpm --filter web build && pnpm --filter api start",
+    "lint": "biome check app/api app/shared app/web package.json pnpm-workspace.yaml biome.json",
+    "format": "biome check --write app/api app/shared app/web package.json pnpm-workspace.yaml biome.json",
+    "test": "pnpm test:node && pnpm test:rokid",
+    "test:node": "pnpm --filter api test && pnpm --filter web test",
+    "test:rokid": "./gradlew :rokid:testDebugUnitTest",
+    "typecheck": "pnpm --filter \"./app/*\" typecheck",
+    "check": "pnpm lint && pnpm typecheck"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.8"
+  }
+}

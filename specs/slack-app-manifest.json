@@ -1,0 +1,20 @@
+{
+  "display_information": {
+    "name": "SCRAFT Rokid",
+    "description": "Rokidから現場写真を送り、PCからの返信をグラスで確認する",
+    "background_color": "#533365"
+  },
+  "features": {
+    "bot_user": { "display_name": "SCRAFT Rokid", "always_online": false }
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": ["files:write", "files:read", "groups:read", "groups:history", "users:read"]
+    }
+  },
+  "settings": {
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false
+  }
+}

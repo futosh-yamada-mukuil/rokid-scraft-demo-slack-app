@@ -1,0 +1,73 @@
+#!/bin/sh
+#
+# pre-commit: ステージされた内容に応じて、Kotlin と JS/TS の両方を通す。
+#
+#   Kotlin (.kt) がある場合:
+#     1) ktlint で整形（自動修正）して再ステージ
+#     2) ktlintCheck（違反でコミット中止）
+#     3) ユニットテスト（失敗でコミット中止）
+#
+#   JS/TS/CSS/JSON（app/api・app/web）がある場合:
+#     1) Biome で整形＋自動修正して再ステージ
+#     2) Biome の lint（違反でコミット中止）
+#     3) tsc --noEmit（型エラーでコミット中止）
+#
+# 参考: jrck-education-video-editor の .githooks/pre-commit（biome/ruff 版）。
+#
+# 有効化: リポジトリルートで
+#   git config core.hooksPath .githooks
+set -eu
+
+ROOT=$(git rev-parse --show-toplevel)
+cd "$ROOT"
+
+STAGED_KT=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '\.kt$' || true)
+STAGED_JS=$(git diff --cached --name-only --diff-filter=ACMR \
+  | grep -E '^(app/(api|web)/|biome\.json$|package\.json$)' \
+  | grep -E '\.(ts|tsx|js|jsx|mjs|cjs|css|json)$' || true)
+
+[ -z "$STAGED_KT" ] && [ -z "$STAGED_JS" ] && exit 0
+
+# ---- Kotlin ----
+if [ -n "$STAGED_KT" ]; then
+  # JAVA_HOME / ANDROID_HOME 未設定なら既定の場所を補う（local.properties が無い環境向け）。
+  if [ -z "${JAVA_HOME:-}" ]; then
+    export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
+  fi
+  if [ -z "${ANDROID_HOME:-}" ]; then
+    export ANDROID_HOME="$HOME/Library/Android/sdk"
+  fi
+
+  echo "pre-commit: ktlintFormat（整形）..."
+  ./gradlew -q :rokid:ktlintFormat
+  # 整形結果を再ステージ（元々ステージ済みの .kt のみ）。
+  printf '%s\n' $STAGED_KT | xargs git add
+
+  echo "pre-commit: ktlintCheck（lint）..."
+  ./gradlew -q :rokid:ktlintCheck
+
+  echo "pre-commit: ユニットテスト..."
+  ./gradlew -q :rokid:testDebugUnitTest
+fi
+
+# ---- JS / TS ----
+if [ -n "$STAGED_JS" ]; then
+  if [ ! -d node_modules ]; then
+    echo "pre-commit: node_modules が無いので pnpm install を実行..."
+    pnpm install --frozen-lockfile
+  fi
+
+  echo "pre-commit: Biome（整形＋自動修正）..."
+  # shellcheck disable=SC2086
+  pnpm exec biome check --write $STAGED_JS
+  printf '%s\n' $STAGED_JS | xargs git add
+
+  echo "pre-commit: Biome（lint）..."
+  # shellcheck disable=SC2086
+  pnpm exec biome check $STAGED_JS
+
+  echo "pre-commit: 型チェック..."
+  pnpm -s typecheck
+fi
+
+echo "pre-commit: OK"

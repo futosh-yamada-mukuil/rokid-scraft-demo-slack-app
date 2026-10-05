@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <!-- UI確認用APKは、操作しても外部サービスへ通信しない。 -->
+    <uses-permission android:name="android.permission.INTERNET" tools:node="remove" />
+    <application>
+        <service android:name=".feature.notification.TeamsPollingService" tools:node="remove" />
+    </application>
+</manifest>

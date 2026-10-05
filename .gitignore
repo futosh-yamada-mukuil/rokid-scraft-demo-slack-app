@@ -1,0 +1,52 @@
+
+# AI エージェントのワークツリー
+# APIキー等の秘密（AmiVoice / Gemini など）
+# Google Cloud サービスアカウント鍵（TTS）
+# Node
+# Teams のアクセストークン（復旧動線用）
+# ローカル参考メモ（Web プロジェクト由来の Git ルール。CLAUDE.md に翻案済み）
+# 受信モニタが保存した実データ
+# 論理削除の置き場
+# 顧客支給資料・検証スクリプト・レビュー控えなど、ローカル専用の資料
+# （資格情報や再配布できない著作物を含む可能性があるためコミットしない）
+*-service-account*.json
+*.apk
+*.iml
+*.jks
+*.keystore
+.DS_Store
+.claude/
+.codex/
+.cxx/
+.env
+.env.*
+.externalNativeBuild/
+.gradle/
+.idea/
+.kotlin/
+.local/
+.vscode/
+.upload-token
+app/*/dist/
+app/api/.teams-token.json
+app/api/.upload-token
+app/api/trash/
+app/api/uploads/
+app/api/replies/
+app/web/.vite/
+app/web/uploads/
+build/
+captures/
+gcp-*.json
+intage-501612-894a331bf11c.json
+local.properties
+node_modules/
+__pycache__/
+rurl.md
+token_cache.bin
+app/rokid/libs/sherpa-onnx-*.aar
+app/rokid/src/main/assets/offline-stt/*.onnx
+app/rokid/src/main/assets/offline-stt/tiny-tokens.txt
+app/rokid/src/main/assets/offline-stt/sensevoice-tokens.txt
+app/rokid/libs/sensevoice-int8-2024-07-17.tar.bz2
+!.env.example

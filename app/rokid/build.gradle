@@ -1,0 +1,197 @@
+plugins {
+    // Kotlin のコンパイルは AGP 9 の built-in Kotlin が担当する（kotlin-android は不要）。
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.plugin.compose'
+    id 'org.jlleitschuh.gradle.ktlint'
+}
+
+// ── .env → BuildConfig ──────────────────────────────────────────────────────
+// Google機能のキーとSlack中継サーバの公開URL・IDを .env（gitignore済み）から読み込む。
+// Slack BotトークンはPC専用で、APKには入れない。未設定でもビルドが通るよう既定は空文字。
+// キーの一覧と用途は .env.example を参照。値はログにも Git にも出さないこと。
+def secrets = new Properties()
+def envFile = rootProject.file('.env')
+if (envFile.exists()) {
+    envFile.withInputStream { secrets.load(it) }
+}
+
+// Java 文字列リテラルとして安全な形に整える。
+def asStringLiteral = { String value ->
+    def escaped = (value ?: '')
+        .replace('\\', '\\\\')
+        .replace('"', '\\"')
+        .replace('\r', '')
+        .replace('\n', '\\n')
+    '"' + escaped + '"'
+}
+
+// .env の値をそのまま BuildConfig へ。
+def secret = { String key -> asStringLiteral((secrets.getProperty(key) ?: '').trim()) }
+
+android {
+    namespace = 'com.scraft.glassreport'
+    compileSdk = 37
+
+    defaultConfig {
+        applicationId = "com.scraft.glassreport"
+        minSdk = 28          // Rokid CXR SDK の最小要件に合わせる
+        targetSdk = 32       // Rokid Glasses = Android 12 / API 32
+        versionCode = 1
+        versionName = "0.2.0"
+        testInstrumentationRunner project.findProperty('instrumentationRunner') ?: "com.scraft.glassreport.capture.camera.PhotoWatermarkDeviceTest"
+        buildConfigField 'boolean', 'UI_PREVIEW', 'false'
+        buildConfigField 'boolean', 'AVD_CONTROLS', 'false'
+        // Slack Bot credentials must never be copied into BuildConfig. Only the relay address is public.
+        buildConfigField 'String', 'SLACK_RELAY_URL', secret('SLACK_RELAY_URL')
+        buildConfigField 'String', 'SLACK_WORKSPACE_ID', secret('SLACK_WORKSPACE_ID')
+        buildConfigField 'String', 'SLACK_CHANNEL_ID', secret('SLACK_CHANNEL_ID')
+
+        // One APK key for Google STT, TTS and Cloud Translation; old names are build-time fallbacks only.
+        buildConfigField 'String', 'GOOGLE_STT_TTS_TRANSLATE_API_KEY', asStringLiteral(
+            (secrets.getProperty('GOOGLE_STT_TTS_TRANSLATE_API_KEY') ?: '').trim() ?:
+            (secrets.getProperty('GOOGLE_STT_TTS_API_KEY') ?: '').trim() ?: (secrets.getProperty('GOOGLE_TTS_API_KEY') ?: '').trim())
+
+        // Microsoft Graph（Teams）。サインインは Device Code Flow で人が行うため、
+        // 運用者の資格情報（MS_SIGNIN_USER / MS_SIGNIN_PASSWORD）は焼き込まない。
+        buildConfigField 'String', 'MS_TENANT_ID', secret('MS_TENANT_ID')
+        buildConfigField 'String', 'MS_CLIENT_ID', secret('MS_CLIENT_ID')
+        buildConfigField 'String', 'MS_TEAM_ID', secret('MS_TEAM_ID')
+        buildConfigField 'String', 'MS_CHANNEL_ID', secret('MS_CHANNEL_ID')
+
+    }
+
+    buildTypes {
+        debug {
+            ndk { abiFilters 'arm64-v8a' }
+        }
+        release {
+            minifyEnabled = false
+            ndk { abiFilters 'arm64-v8a' }
+        }
+        emulator {
+            initWith debug
+            applicationIdSuffix '.emulator'
+            versionNameSuffix '-ui-preview'
+            matchingFallbacks = ['debug']
+            ndk {
+                abiFilters.clear()
+                abiFilters 'arm64-v8a', 'x86_64'
+            }
+            buildConfigField 'boolean', 'UI_PREVIEW', 'true'
+            buildConfigField 'boolean', 'AVD_CONTROLS', 'true'
+            // UI確認APKへ実サービスの設定や秘密値を入れない。
+            ['MS_TENANT_ID', 'MS_CLIENT_ID', 'MS_TEAM_ID', 'MS_CHANNEL_ID',
+             'GOOGLE_STT_TTS_TRANSLATE_API_KEY', 'SLACK_RELAY_URL', 'SLACK_WORKSPACE_ID', 'SLACK_CHANNEL_ID'].each { key ->
+                buildConfigField 'String', key, '""'
+            }
+        }
+        slackEmulator {
+            initWith debug
+            applicationIdSuffix '.slack'
+            versionNameSuffix '-slack-avd'
+            matchingFallbacks = ['debug']
+            ndk {
+                abiFilters.clear()
+                abiFilters 'arm64-v8a', 'x86_64'
+            }
+            buildConfigField 'boolean', 'AVD_CONTROLS', 'true'
+            buildConfigField 'String', 'SLACK_RELAY_URL', asStringLiteral(
+                project.findProperty('slackEmulatorUrl') ?: 'http://127.0.0.1:8787')
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+    buildFeatures {
+        // Compose コンパイラは built-in Kotlin が同梱するものを AGP が自動で適用するため、
+        // composeOptions（kotlinCompilerExtensionVersion）は不要になった。
+        compose = true
+        buildConfig = true
+    }
+
+    androidResources {
+        noCompress += ['onnx']
+        // Filter legacy models in AGP's asset merger; SourceDirectorySet.exclude was ineffective.
+        ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~:!tiny-*'
+    }
+
+    lint {
+        // Play ストア非公開（Rokid Glasses へ sideload するだけ）のため、
+        // targetSdk を端末の API 32 に合わせている。Play 専用ルールは対象外。
+        disable 'ExpiredTargetSdkVersion'
+    }
+
+    testOptions {
+        // ローカル JVM テストではログと経過時間取得だけ Android の既定値を返す。
+        // カメラ・録音本体は実機テスト対象とし、状態遷移と HTTP 契約をここで検証する。
+        unitTests.returnDefaultValues = true
+    }
+}
+
+// built-in Kotlin では android.kotlinOptions{} が廃止され、トップレベルの kotlin{} に移った。
+// jvmTarget は既定で compileOptions.targetCompatibility を引き継ぐが、
+// 実機が Android 12 / API 32 のため 17 から動かさないことを明示しておく。
+kotlin {
+    compilerOptions {
+        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
+    }
+}
+
+dependencies {
+    implementation files('libs/sherpa-onnx-1.13.3.aar')
+    implementation 'androidx.core:core-ktx:1.19.0'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0'
+
+    // Jetpack Compose（UI）
+    implementation platform('androidx.compose:compose-bom:2026.08.00')
+    implementation 'androidx.activity:activity-compose:1.13.0'
+    implementation 'androidx.compose.ui:ui'
+    implementation 'androidx.compose.ui:ui-graphics'
+    implementation 'androidx.compose.material3:material3'
+    implementation 'androidx.compose.ui:ui-tooling-preview'
+    debugImplementation 'androidx.compose.ui:ui-tooling'
+    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.11.0'
+    implementation 'androidx.lifecycle:lifecycle-viewmodel-compose:2.11.0'
+    // LocalLifecycleOwner は compose-ui から lifecycle-runtime-compose へ移った。
+    implementation 'androidx.lifecycle:lifecycle-runtime-compose:2.11.0'
+    implementation 'androidx.navigation:navigation-compose:2.9.8'
+
+    // CameraX（プレビュー＋静止画撮影。core/camera/CameraPreview.kt が唯一の入口）
+    def camerax = "1.6.1"
+    implementation "androidx.camera:camera-core:$camerax"
+    implementation "androidx.camera:camera-camera2:$camerax"
+    implementation "androidx.camera:camera-lifecycle:$camerax"
+    implementation "androidx.camera:camera-view:$camerax"
+    implementation "androidx.camera:camera-video:$camerax"
+
+    // HTTPS（Teams / Google STT・翻訳・TTS）
+    implementation 'com.squareup.okhttp3:okhttp:5.5.0'
+
+    // トークンの保存（EncryptedSharedPreferences）。端末に残す永続データはこれだけ。
+    implementation 'androidx.security:security-crypto:1.1.0'
+
+    // ローカルユニットテスト
+    testImplementation 'junit:junit:4.13.2'
+    // org.json は Android 実機では framework が提供する（APK には入らない）。
+    // ローカル JVM テストでは android.jar のスタブが既定値を返してしまう（returnDefaultValues）ので、
+    // 同 API の本物をテスト classpath に載せ、Teams / AmiVoice 応答のパースを JVM 上で検証できるようにする。
+    testImplementation 'org.json:json:20260814'
+    testImplementation 'org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0'
+    testImplementation 'com.squareup.okhttp3:mockwebserver:5.5.0'
+    testImplementation 'org.mockito:mockito-core:5.23.0'
+}
+
+tasks.register('verifyOfflineSttAssets') {
+    doLast {
+        ['libs/sherpa-onnx-1.13.3.aar',
+         'src/main/assets/offline-stt/sensevoice-model.int8.onnx',
+         'src/main/assets/offline-stt/sensevoice-tokens.txt'].each { path ->
+            if (!file(path).isFile()) {
+                throw new GradleException("Offline STT asset missing: ${path}. Run bash scripts/fetch-offline-stt.sh")
+            }
+        }
+    }
+}
+tasks.named('preBuild').configure { dependsOn 'verifyOfflineSttAssets' }

@@ -1,0 +1,9 @@
+packages:
+  - 'app/shared'
+  - 'app/api'
+  - 'app/web'
+
+# esbuild（Vite の依存）はネイティブバイナリを展開するビルドスクリプトが要る。
+# pnpm 11 では許可を真偽値で明示する。
+allowBuilds:
+  esbuild: true

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  株式会社ムクイルの公式シンボル。元のpathを維持して中央セーフゾーンに配置。
+  Source: https://www.mukuil.com/wp-content/themes/mukuil/assets/images/common/logo_sp.svg
+  Original: specs/assets/mukuil/logo-symbol.svg
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group android:translateX="29" android:translateY="36.5">
+        <path android:fillColor="#FFFFFFFF"
+            android:pathData="M46.7201 34.964H50L44.6793 27.518H50V24.8561H42.7843L31.2318 8.70504H28.4985C28.2799 8.70504 28.1341 8.95683 28.2799 9.13669L39.5044 24.8561H12.3178C11.1516 24.8561 11.188 23.8849 11.5889 23.4532L28.0612 0.431655C28.207 0.251799 28.0612 0 27.8426 0L25.1093 0L7.25219 24.8921H0.0364426V27.554H5.35714L0 35H3.27988L8.60058 27.6259C8.60058 27.5899 8.67347 27.554 8.74636 27.554H41.3994L46.7201 35V34.964Z" />
+    </group>
+</vector>

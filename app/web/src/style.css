@@ -1,0 +1,35 @@
+@import "tailwindcss";
+
+/*
+  daisyUI の内蔵テーマを使う。色は独自定義せず、コンポーネント側は
+  base-100 / primary などのセマンティックな名前でしか参照しない（＝トークン化）。
+
+  暗い順のおおよそ: black（真っ黒・YouTube に近い） < night < dim < dark
+  既定は black。ヘッダの切替で変更でき、選択は localStorage に残る。
+  独自の色を持ちたくなったら @plugin "daisyui/theme" で全変数を上書きできる。
+*/
+@plugin "daisyui" {
+  themes:
+    black --default,
+    dim,
+    night,
+    dark,
+    sunset,
+    dracula,
+    business,
+    light --prefersdark;
+}
+
+/* daisyUI のセマンティックカラーで表せないものだけ置く。 */
+@theme {
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP",
+    sans-serif;
+}
+
+@layer base {
+  body {
+    @apply bg-base-100 text-base-content font-sans;
+  }
+}

@@ -1,0 +1,23 @@
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+        // Rokid Maven (CXR / UXR SDK を後から追加する場合に使用)
+        maven { url = 'https://maven.rokid.com/repository/maven-public/' }
+    }
+}
+
+rootProject.name = "scraft-glass"
+
+// モノレポ構成: app/rokid だけを Gradle で管理する。
+// app/api・app/web・app/shared は pnpm workspace 側で管理するため、ここには含めない。
+include ':rokid'
+project(':rokid').projectDir = file('app/rokid')

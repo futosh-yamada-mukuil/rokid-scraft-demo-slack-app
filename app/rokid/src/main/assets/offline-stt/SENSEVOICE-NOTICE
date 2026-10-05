@@ -1,0 +1,10 @@
+SenseVoiceSmall multilingual int8 (2024-07-17)
+Authors: FunAudioLLM / Alibaba Group (FunASR)
+Original model: https://huggingface.co/FunAudioLLM/SenseVoiceSmall
+ONNX conversion/distribution: Fangjun Kuang / sherpa-onnx
+https://k2-fsa.github.io/sherpa/onnx/sense-voice/pretrained.html
+https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2
+Model weights are under FunASR Model Open Source License Agreement v1.1.
+See SENSEVOICE-MODEL-LICENSE (not MIT / Apache-2.0).
+Model SHA-256: c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51
+Tokens SHA-256: f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc

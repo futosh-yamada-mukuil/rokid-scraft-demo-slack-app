@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Only loopback HTTP is enabled for adb reverse; Slack itself always uses HTTPS on the PC. -->
+    <application android:networkSecurityConfig="@xml/slack_avd_network_security" />
+</manifest>

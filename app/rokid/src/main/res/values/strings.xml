@@ -1,0 +1,20 @@
+<resources>
+    <string name="app_name">MUKUIL 現場レポート</string>
+    <string name="brand" translatable="false">MUKUIL</string>
+    <!-- ロゴ画像の代替テキスト。アプリの英字表記に合わせる。 -->
+    <string name="vendor_name" translatable="false">MUKUIL</string>
+
+    <string name="preparing">準備中</string>
+    <string name="need_camera">カメラ権限が必要です</string>
+
+    <!-- ホーム（メニュー）の項目。ComingSoonScreen の見出しにも使い回す -->
+    <string name="label_photo">写真を撮る</string>
+    <string name="label_video">動画を撮る</string>
+    <string name="label_feed">返信を見る</string>
+    <string name="label_settings">設定</string>
+    <string name="label_exit">終了</string>
+
+    <!-- 操作ヒント。タッチパッドで区別できるのはタップ／前スワイプ／後スワイプの3つだけ -->
+    <string name="hint_home">スワイプで移動・タップで決定</string>
+    <string name="hint_double_tap_back">ダブルタップで戻る</string>
+</resources>

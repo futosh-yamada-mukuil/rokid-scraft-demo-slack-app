@@ -1,0 +1,8 @@
+<resources>
+    <!-- Rokid Glasses は単眼グリーン単色ディスプレイ。黒背景＋高輝度グリーンが最も視認性が高い -->
+    <color name="bg">#FF000000</color>
+    <color name="green">#FF39FF14</color>
+    <color name="green_dim">#FF1FAA0C</color>
+    <color name="green_faint">#FF0C5006</color>
+    <color name="white">#FFFFFFFF</color>
+</resources>
