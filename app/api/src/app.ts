@@ -18,7 +18,7 @@ import { teamsRoutes } from "./routes/teams.ts";
 import { tokenRoutes } from "./routes/token.ts";
 import { uploadRoutes } from "./routes/upload.ts";
 import { SlackClient, type SlackConfig } from "./slack.ts";
-import { SlackRelay } from "./slack-relay.ts";
+import { SlackRelay, type SlackRelayTiming } from "./slack-relay.ts";
 import { createStorage } from "./storage.ts";
 import { createTeams, type TeamsConfig } from "./teams.ts";
 
@@ -43,6 +43,8 @@ export type AppOptions = {
   /** Slack relay: credentials stay on the PC. A fetcher is injectable for offline contract tests. */
   slack?: SlackConfig;
   slackFetch?: typeof fetch;
+  /** Slack polling cadence. Tests shorten it; production uses the relay defaults. */
+  slackTiming?: Partial<SlackRelayTiming>;
   /** 音声解析と翻訳。テストではフェイクを渡し、未指定時は外部通信しない。 */
   language?: LanguageService;
   /** PC→Rokid返信の保存先。省略時は uploads の兄弟（`../replies`）。 */
@@ -107,7 +109,10 @@ export async function createApp(
   await app.register(replyRoutes, { storage, replies, language, bus, auth });
   await app.register(teamsRoutes, { storage, teams, bus, auth });
   if (opts.slack) {
-    const relay = new SlackRelay(new SlackClient(opts.slack, opts.slackFetch));
+    const relay = new SlackRelay(
+      new SlackClient(opts.slack, opts.slackFetch),
+      opts.slackTiming,
+    );
     await app.register(async (instance) => relay.register(instance));
   }
   await app.register(streamRoutes, { bus });

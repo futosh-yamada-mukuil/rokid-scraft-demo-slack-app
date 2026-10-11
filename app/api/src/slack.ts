@@ -14,6 +14,9 @@ export type SlackMessage = {
   bot_id?: string;
   subtype?: string;
   thread_ts?: string;
+  /** Present on thread parents. Lets one history call reveal which threads gained replies. */
+  reply_count?: number;
+  latest_reply?: string;
   files?: { id: string; mimetype?: string }[];
 };
 
@@ -167,11 +170,15 @@ export class SlackClient {
     photo: Buffer,
     caption: string,
   ): Promise<{ fileId: string; threadTs?: string }> {
-    await this.ready(true);
-    const ticket = await this.call("files.getUploadURLExternal", {
-      filename: `rokid-${Date.now()}.jpg`,
-      length: String(photo.length),
-    });
+    // Requesting the upload slot sends no photo data, so it overlaps the destination check.
+    // The bytes still leave this PC only after the workspace, privacy and membership are confirmed.
+    const [, ticket] = await Promise.all([
+      this.ready(true),
+      this.call("files.getUploadURLExternal", {
+        filename: `rokid-${Date.now()}.jpg`,
+        length: String(photo.length),
+      }),
+    ]);
     if (!ticket.file_id || !ticket.upload_url)
       throw new SlackError("invalid_upload_response");
     const target = new URL(ticket.upload_url);
