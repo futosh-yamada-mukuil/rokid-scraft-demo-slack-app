@@ -4,9 +4,16 @@ import com.scraft.glassreport.data.prefs.InMemoryTokenStore
 import com.scraft.glassreport.data.prefs.Tokens
 import com.scraft.glassreport.net.SignInRequiredException
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.SocketPolicy
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -14,6 +21,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.util.concurrent.TimeUnit
 
 class SlackRelayTest {
     private lateinit var server: MockWebServer
@@ -116,6 +124,112 @@ class SlackRelayTest {
             assertTrue(first.contains("設備確認"))
             assertTrue(first.contains("name=\"photo\""))
             assertFalse(client.accepts("video/mp4"))
+        }
+
+    private fun feed(
+        version: String,
+        text: String = "確認しました",
+    ) = MockResponse().setBody(
+        """{"posts":[{"id":"C1/1000.1","author":"PC担当","text":"$text","createdAtMs":1000100}],"version":"$version"}""",
+    )
+
+    @Test
+    fun relayChangeIsAnnouncedByWaitingOnTheVersionOnScreen() =
+        runTest {
+            connected()
+            server.enqueue(feed("v1"))
+            // 変化なしで保留が明けた応答では知らせず、もう一度待つ。
+            server.enqueue(feed("v1"))
+            server.enqueue(feed("v2", "追加で撮影してください"))
+
+            client.latest().getOrThrow()
+            assertEquals("/api/slack/feed", server.takeRequest().path)
+            client.updates.first()
+
+            val waited = server.takeRequest()
+            assertEquals("/api/slack/feed?since=v1&wait=25", waited.path)
+            assertEquals("Bearer device-secret", waited.getHeader("Authorization"))
+            assertEquals("/api/slack/feed?since=v1&wait=25", server.takeRequest().path)
+            // 知らせた後は新しい版で待ち直す。その要求が出る前に購読を終えることもある。
+            assertTrue(server.requestCount in 3..4)
+        }
+
+    @Test
+    fun nothingWaitsUntilTheFirstFeedIsShownOrWhenTheRelayHasNoVersions() =
+        runTest {
+            connected()
+            // 版を返さない旧中継サーバ。待つ相手が無いので取得は定期更新だけになる。
+            server.enqueue(MockResponse().setBody("""{"posts":[]}"""))
+            client.latest().getOrThrow()
+
+            val waiting = launch { client.updates.first() }
+            testScheduler.advanceTimeBy(120_000)
+            assertEquals(1, server.requestCount)
+            waiting.cancel()
+        }
+
+    @Test
+    fun revokedDeviceIsAnnouncedOnceAndWaitingStopsUntilItIsPairedAgain() =
+        runTest {
+            connected()
+            server.enqueue(feed("v1"))
+            server.enqueue(MockResponse().setResponseCode(401).setBody("""{"error":"register"}"""))
+            client.latest().getOrThrow()
+
+            client.updates.first()
+            assertNull(store.load())
+            assertTrue(client.latest().exceptionOrNull() is SignInRequiredException)
+
+            val waiting = launch { client.updates.first() }
+            testScheduler.advanceTimeBy(120_000)
+            assertEquals(2, server.requestCount)
+            waiting.cancel()
+        }
+
+    @Test
+    fun connectionLossWhileWaitingRetriesInsteadOfEndingUpdates() =
+        runTest {
+            connected()
+            server.enqueue(feed("v1"))
+            server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AT_START))
+            server.enqueue(MockResponse().setResponseCode(503).setBody("""{"error":"Slackの利用制限です"}"""))
+            server.enqueue(feed("v2"))
+            client.latest().getOrThrow()
+
+            client.updates.first()
+
+            assertTrue(server.requestCount >= 4)
+            assertEquals("device-secret", store.load()?.accessToken)
+        }
+
+    @Test
+    fun leavingTheScreenClosesTheWaitingRequest() =
+        runTest {
+            connected()
+            server.enqueue(feed("v1"))
+            server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
+            client.latest().getOrThrow()
+            server.takeRequest()
+
+            val waiting = async(Dispatchers.IO) { client.updates.first() }
+            withContext(Dispatchers.IO) { checkNotNull(server.takeRequest(5, TimeUnit.SECONDS)) }
+            waiting.cancel()
+            // 25秒の保留が明けるのを待たずに終わる。
+            withContext(Dispatchers.IO) { withTimeout(5_000) { waiting.join() } }
+            assertTrue(waiting.isCancelled)
+        }
+
+    @Test
+    fun sendingAPhotoAnnouncesAnUpdateSoTheLobbyShowsItAtOnce() =
+        runTest {
+            connected()
+            server.enqueue(MockResponse().setBody("""{"ok":true,"fileId":"F1"}"""))
+            val announced = async { client.updates.first() }
+            testScheduler.runCurrent()
+
+            assertTrue(client.send(byteArrayOf(-1, -40, -1), "image/jpeg", "設備確認", null).isSuccess)
+
+            announced.await()
         }
 
     @Test

@@ -17,16 +17,18 @@ import com.scraft.glassreport.capture.tts.Speaker
 import com.scraft.glassreport.core.sound.Chime
 import com.scraft.glassreport.domain.model.FeedPost
 import com.scraft.glassreport.net.SignInRequiredException
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 private const val TAG = "SlackPollingService"
 private const val CHANNEL_ID = "teams-background-status"
@@ -69,9 +71,15 @@ class TeamsPollingService : Service() {
                     // Activity 前面中は既存HUDが担当。背景になった瞬間に1回確認する。
                     AppVisibility.visible.collectLatest { visible ->
                         if (!visible) {
-                            while (currentCoroutineContext().isActive) {
-                                val retryMs = refresh()
-                                delay(retryMs)
+                            coroutineScope {
+                                // 中継サーバの変化通知や翻訳の完了が届いたら、次の定期確認を待たずに確かめる。
+                                // 届かない間は従来どおり POLL_MS / ERROR_POLL_MS の間隔で確認する。
+                                val wake = Channel<Unit>(Channel.CONFLATED)
+                                launch { container.channelNotificationRepository.updates.collect { wake.trySend(Unit) } }
+                                while (isActive) {
+                                    val retryMs = refresh()
+                                    withTimeoutOrNull(retryMs) { wake.receive() }
+                                }
                             }
                         }
                     }
@@ -81,7 +89,15 @@ class TeamsPollingService : Service() {
     }
 
     private suspend fun refresh(): Long {
-        val result = runCatching { container.channelNotificationRepository.latest() }.getOrElse { Result.failure(it) }
+        val result =
+            try {
+                container.channelNotificationRepository.latest()
+            } catch (cancelled: CancellationException) {
+                // 前面復帰やサービス終了による取り消しを「接続できません」と通知へ書かない。
+                throw cancelled
+            } catch (error: Exception) {
+                Result.failure(error)
+            }
         // 通信中にActivityが前面へ戻ったら既読を奪わず、HUD側に引き継ぐ。
         if (AppVisibility.activityVisible) return POLL_MS
         return result.fold(

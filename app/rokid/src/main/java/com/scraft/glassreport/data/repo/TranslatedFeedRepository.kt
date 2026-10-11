@@ -11,12 +11,28 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.merge
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeout
+import java.util.concurrent.atomic.AtomicBoolean
+
+/** Posts fetched within this window are re-presented without another Graph GET. */
+private const val RAW_REUSE_MS = 3_000L
+
+/**
+ * [clock] is wall time and can jump (the glasses sync it after boot). A reading earlier than the
+ * recorded one means the clock moved back, so the interval is treated as elapsed instead of
+ * freezing the feed or the translation retry until the clock catches up.
+ */
+private fun elapsedAtLeast(
+    now: Long,
+    since: Long,
+    intervalMs: Long,
+): Boolean = (now - since).let { it < 0 || it >= intervalMs }
 
 /** In-memory only. One worker protects API quotas; no message content is persisted or logged. */
 class FeedTranslationCache(
@@ -62,7 +78,7 @@ class FeedTranslationCache(
             }
             val key = Key(channel, post.id, post.text, target)
             var entry = entries[key]
-            if (entry?.result?.isFailure == true && clock() - entry.finishedAt >= retryMs) {
+            if (entry?.result?.isFailure == true && elapsedAtLeast(clock(), entry.finishedAt, retryMs)) {
                 entries.remove(key)
                 entry = null
             }
@@ -76,7 +92,8 @@ class FeedTranslationCache(
                             try {
                                 withTimeout(25_000) {
                                     worker.withPermit {
-                                        if (clock() < retryNotBefore) {
+                                        // A backoff longer than retryMs can only come from a clock that moved back.
+                                        if (retryNotBefore - clock() in 1..retryMs) {
                                             Result.failure(IllegalStateException("翻訳の再試行待ち"))
                                         } else {
                                             translator
@@ -125,7 +142,9 @@ class TranslatedFeedRepository(
     configUpdates: Flow<Unit>,
     private val clock: () -> Long = System::currentTimeMillis,
 ) : FeedRepository {
-    override val updates = merge(cache.updates, configUpdates)
+    /** The source said its content changed: the next [latest] must not answer from the reuse window. */
+    private val sourceChanged = AtomicBoolean(false)
+    override val updates = merge(cache.updates, configUpdates, source.updates.onEach { sourceChanged.set(true) })
     private val mutex = Mutex()
     private var fetchedAt = Long.MIN_VALUE
     private var fetchedChannel = ""
@@ -138,7 +157,10 @@ class TranslatedFeedRepository(
             val activeTarget = target()
             val languageChanged = lastTarget != activeTarget
             lastTarget = activeTarget
-            if (raw == null || fetchedChannel != activeChannel || (!languageChanged && clock() - fetchedAt >= 3_000)) {
+            val stale = elapsedAtLeast(clock(), fetchedAt, RAW_REUSE_MS)
+            // Cleared before fetching, so a change announced during the request is fetched next time.
+            val announced = sourceChanged.getAndSet(false)
+            if (raw == null || fetchedChannel != activeChannel || announced || (!languageChanged && stale)) {
                 val result = source.latest()
                 if (result.isFailure) return@withLock result
                 // Do not display results from a channel that changed during the remote request.
