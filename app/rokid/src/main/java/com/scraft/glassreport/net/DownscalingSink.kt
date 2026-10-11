@@ -1,5 +1,8 @@
 package com.scraft.glassreport.net
 
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+
 /**
  * JPEG を長辺 [maxEdge]px 以下に落とす処理。
  *
@@ -35,7 +38,12 @@ class DownscalingSink(
         mime: String,
         comment: String,
         voice: ByteArray?,
-    ): Result<SendOutcome> = delegate.send(if (mime == MIME_JPEG) downscaler.downscale(bytes, maxEdge) else bytes, mime, comment, voice)
+    ): Result<SendOutcome> {
+        // 縮小は JPEG のデコードと再エンコードを伴う。送信はメインスレッドから呼ばれるので、
+        // ここで逃がさないと「送信中」の表示が出る前に画面が固まる。
+        val payload = if (mime == MIME_JPEG) withContext(Dispatchers.Default) { downscaler.downscale(bytes, maxEdge) } else bytes
+        return delegate.send(payload, mime, comment, voice)
+    }
 }
 
 /** `teamsClient.limitedToLongEdge(PHOTO_TEAMS_MAX_EDGE, downscaler)` と書けるようにするだけ。 */
