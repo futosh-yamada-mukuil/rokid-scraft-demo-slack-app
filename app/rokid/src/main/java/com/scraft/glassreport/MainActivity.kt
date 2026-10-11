@@ -60,8 +60,11 @@ class MainActivity : ComponentActivity() {
                     if (BuildConfig.AVD_CONTROLS) {
                         UiPreviewControls(
                             onKey = { key ->
-                                dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, key))
-                                dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, key))
+                                // ウィンドウへ渡す。DecorView は Activity（Window.Callback）経由で配送するので、
+                                // 実機のタッチパッドのキーと同じ経路で glassControls に届く。
+                                // ComponentActivity.dispatchKeyEvent の直接呼び出しはライブラリ内部向け（RestrictedApi）。
+                                window.decorView.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, key))
+                                window.decorView.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, key))
                             },
                             onBack = { onBackPressedDispatcher.onBackPressed() },
                             onReply = (application as SCRAFTApp).container.uiPreview?.let { { it.addReply() } },
