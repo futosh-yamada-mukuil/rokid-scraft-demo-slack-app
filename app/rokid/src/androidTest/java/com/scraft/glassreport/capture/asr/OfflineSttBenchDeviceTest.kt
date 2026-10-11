@@ -15,7 +15,8 @@ import java.io.File
  * - 入力は開発者が用意した合成音声だけ（app-private の `files/offline-stt-bench/`）。
  *   `manifest.tsv` に「ファイル名<TAB>期待文」を 1 行ずつ書く。マイク・カメラ・ネットワークは使わない。
  * - 各音声を従来どおり「認識の直前にモデルを読み込む」方法で認識する。
- * - `-e raw true` を付けると、後処理（空白の整形と既知の取り違えの修正）を通さないモデルの生の出力を返す。
+ * - `-e raw true` を付けると、後処理（空白の整形と既知の取り違えの修正）を通さないモデルの生の出力を、
+ *   モデルが付けた言語・イベントの札（`<|ja|>` `<|Speech|>` など）と一緒に返す。
  * - `-e warm <件数>` を付けると、先頭からその件数だけ「録音中に先読みした場合」も測る。
  *   先読みを始めてから録音時間ぶん待って認識し、**結果が同じであること**を確かめる。
  *
@@ -41,7 +42,12 @@ class OfflineSttBenchDeviceTest : Instrumentation() {
                     .readLines()
                     .filter { it.contains('\t') }
                     .map { it.substringBefore('\t') to it.substringAfter('\t') }
-            val transcriber = if (raw) OfflineWavTranscriber(targetContext) { it } else OfflineWavTranscriber(targetContext)
+            val transcriber =
+                if (raw) {
+                    OfflineWavTranscriber(targetContext) { "${it.lang}${it.emotion}${it.event} ${it.text}" }
+                } else {
+                    OfflineWavTranscriber(targetContext)
+                }
             check(transcriber.available) { transcriber.unavailableReason }
             val report = StringBuilder()
             runBlocking {

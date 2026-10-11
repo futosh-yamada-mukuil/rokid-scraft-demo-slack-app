@@ -37,7 +37,7 @@ class TranscriptTextTest {
     @Test
     fun keepsTheSpaceBetweenLatinAndJapanese() {
         assertEquals("Wi-Fi が切れました", TranscriptText.normalize("Wi-Fi が 切れました"))
-        assertEquals("3 号機は OK です", TranscriptText.normalize("3 号機 は OK です"))
+        assertEquals("3号機は OK です", TranscriptText.normalize("3 号機 は OK です"))
     }
 
     @Test
@@ -88,6 +88,47 @@ class TranscriptTextTest {
         posted.forEach { (before, after) -> assertEquals(after, TranscriptText.fromOfflineRecognizer(before)) }
         // 整形は何度掛けても変わらない（確認画面で保持した文を再送しても崩れない）。
         posted.values.forEach { assertEquals(it, TranscriptText.fromOfflineRecognizer(it)) }
+    }
+
+    @Test
+    fun removesTheSpaceBetweenDigitsAndJapaneseButNotInOtherLanguages() {
+        // 人の声の実録音（モデル配布物の ja.wav）に対する実モデルの生の出力。
+        assertEquals(
+            "うちの中学は弁当制で持っていけない場合は、50円の学校販売のパンを買う。",
+            TranscriptText.fromOfflineRecognizer("うち の 中学 は 弁当 制 で 持っ ていけない 場 合は、50 円 の 学校 販売 の パン を 買う。"),
+        )
+        assertEquals("2024年10月4日の点検", TranscriptText.normalize("2024 年 10 月 4 日 の 点検"))
+        assertEquals("圧力は5メガパスカル", TranscriptText.normalize("圧力 は 5 メガパスカル"))
+        // 同じ実録音セットの英語・中国語・韓国語。数字まわりを含め変えない。
+        val untouched =
+            listOf(
+                "The tribal chieftain called for the boy and presented him with 50 pieces.",
+                "开饭时间早上9点至下午5点。",
+                "조 금만 생각 을 하 면서 살 면 훨씬 편할 거야.",
+                "50 원입니다",
+                "090 1234 5678",
+            )
+        untouched.forEach { assertEquals(it, TranscriptText.fromOfflineRecognizer(it)) }
+    }
+
+    @Test
+    fun outputForRecordingsWithoutSpeechIsTreatedAsNothingHeard() {
+        // 雑音だけの録音（白色・ピンク・ハム、最大振幅300〜3000）に実モデルが返した出力と、
+        // スピーカー越しの小さい音に返した出力。
+        listOf(".", "I.", "我.", "The.", " . ", "。", "").forEach {
+            assertEquals("「$it」は中身が無い", "", TranscriptText.fromOfflineRecognizer(it))
+        }
+        // 言いよどみだけ。
+        listOf("Uh.", "えー。", "あ", "嗯。").forEach { assertEquals("", TranscriptText.fromOfflineRecognizer(it)) }
+    }
+
+    @Test
+    fun shortButRealRepliesAreKept() {
+        listOf("OK", "Ok.", "No.", "Yes.", "はい。", "了解", "済み", "可以。", "好。", "是", "네.", "예", "Done.", "5").forEach {
+            assertEquals(it, TranscriptText.fromOfflineRecognizer(it))
+        }
+        // 「The」で始まる普通の文は当然残す。
+        assertEquals("The valve is closed.", TranscriptText.fromOfflineRecognizer("The valve is closed."))
     }
 
     @Test

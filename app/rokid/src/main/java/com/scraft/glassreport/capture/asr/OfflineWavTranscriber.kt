@@ -7,6 +7,7 @@ import android.util.Log
 import com.k2fsa.sherpa.onnx.OfflineModelConfig
 import com.k2fsa.sherpa.onnx.OfflineRecognizer
 import com.k2fsa.sherpa.onnx.OfflineRecognizerConfig
+import com.k2fsa.sherpa.onnx.OfflineRecognizerResult
 import com.k2fsa.sherpa.onnx.OfflineSenseVoiceModelConfig
 import com.scraft.glassreport.domain.text.TranscriptText
 import kotlinx.coroutines.CancellationException
@@ -26,8 +27,8 @@ import java.io.File
 /** On-device SenseVoiceSmall int8, automatic input language. No network fallback. */
 class OfflineWavTranscriber(
     context: Context,
-    /** モデルの生の出力を投稿用の文にする後処理。端末上の検証で生の出力を見るときだけ差し替える。 */
-    private val refine: (String) -> String = TranscriptText::fromOfflineRecognizer,
+    /** モデルの出力を投稿用の文にする後処理。端末上の検証で生の出力を見るときだけ差し替える。 */
+    private val refine: (OfflineRecognizerResult) -> String = { TranscriptText.fromOfflineRecognizer(it.text) },
 ) : WavTranscriber {
     private val appContext = context.applicationContext
     private val assetsPresent =
@@ -86,7 +87,7 @@ class OfflineWavTranscriber(
                         stream.acceptWaveform(padded, 16000)
                         loaded.decode(stream)
                         currentCoroutineContext().ensureActive()
-                        val text = refine(loaded.getResult(stream).text)
+                        val text = refine(loaded.getResult(stream))
                         Log.i(
                             TAG,
                             "Offline STT completed elapsedMs=${SystemClock.elapsedRealtime() - started} " +
