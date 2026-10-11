@@ -6,6 +6,7 @@ import { afterEach, beforeEach, test } from "node:test";
 import type { FastifyInstance } from "fastify";
 import { createApp } from "../src/app.ts";
 import { SlackClient, type SlackMessage } from "../src/slack.ts";
+import type { SlackRelayTiming } from "../src/slack-relay.ts";
 
 let root: string;
 let app: FastifyInstance;
@@ -19,6 +20,10 @@ let privateChannel: boolean;
 let member: boolean;
 let rateLimit: boolean;
 let infoMissing: boolean;
+/** Thread ts → single-page replies. Threads not listed keep the two-page default below. */
+let threads: Record<string, SlackMessage[]>;
+let historyCalls: number;
+let transfers: number;
 const config = () => ({
   botToken: "xoxb-test-secret",
   workspaceId: "T_MUKUIL",
@@ -31,6 +36,7 @@ const fetcher: typeof fetch = async (input, init) => {
   const fields = new URLSearchParams(String(init?.body));
   if (String(input).startsWith("https://files.slack.com/")) {
     assert.equal(init?.headers && "Authorization" in init.headers, false);
+    transfers++;
     return new Response("OK");
   }
   assert.equal(
@@ -84,10 +90,13 @@ const fetcher: typeof fetch = async (input, init) => {
             },
           });
     case "conversations.history":
+      historyCalls++;
       return Response.json({ ok: true, messages: history });
     case "conversations.replies": {
       const ts = fields.get("ts") ?? "";
       replyCalls.push(ts);
+      if (threads[ts])
+        return Response.json({ ok: true, messages: threads[ts] });
       if (!fields.get("cursor"))
         return Response.json({
           ok: true,
@@ -142,6 +151,9 @@ beforeEach(async () => {
   member = true;
   rateLimit = false;
   infoMissing = false;
+  threads = {};
+  historyCalls = 0;
+  transfers = 0;
   client = new SlackClient(config(), fetcher);
   app = await createApp({
     uploadDir: join(root, "uploads"),
@@ -154,6 +166,49 @@ afterEach(async () => {
   await app.close();
   await rm(root, { recursive: true, force: true });
 });
+
+/** Same PC state, different polling cadence: the relay is recreated the way a restart would. */
+async function restart(slackTiming: Partial<SlackRelayTiming>): Promise<void> {
+  await app.close();
+  app = await createApp({
+    uploadDir: join(root, "uploads"),
+    serveStatic: false,
+    slack: config(),
+    slackFetch: fetcher,
+    slackTiming,
+  });
+}
+
+const feed = (token: string, query = "") =>
+  app.inject({
+    url: `/api/slack/feed${query}`,
+    headers: { authorization: `Bearer ${token}` },
+  });
+
+/** A photo parent as channel history reports it, with the thread summary Slack attaches. */
+const parent = (ts: string, replies: SlackMessage[] = []): SlackMessage => ({
+  ts,
+  text: "写真",
+  user: "U_BOT",
+  files: [{ id: `F${ts.split(".")[1]}`, mimetype: "image/jpeg" }],
+  ...(replies.length
+    ? {
+        thread_ts: ts,
+        reply_count: replies.length,
+        latest_reply: replies.at(-1)?.ts,
+      }
+    : {}),
+});
+const reply = (ts: string, threadTs: string, text: string): SlackMessage => ({
+  ts,
+  text,
+  user: "U_HUMAN",
+  thread_ts: threadTs,
+});
+function thread(ts: string, replies: SlackMessage[]): void {
+  threads[ts] = [parent(ts, replies), ...replies];
+  history = history.map((m) => (m.ts === ts ? parent(ts, replies) : m));
+}
 
 async function pair(label: string): Promise<string> {
   const page = await app.inject({ url: "/slack/pair" });
@@ -361,7 +416,7 @@ test("thread replies are paginated and routed only to their originating device, 
   assert.equal(
     replyCalls.length,
     4,
-    "shared 30s cache prevents polling once per Android screen",
+    "the shared cache prevents polling once per Android screen",
   );
 });
 
@@ -434,4 +489,184 @@ test("photo-only bot captions remain image placeholders rather than translation 
   ).json().posts;
   assert.equal(feed[0].text, "(コメントなし)");
   assert.equal(feed[0].imageCount, 1);
+});
+
+test("a new reply is found from channel history alone, re-reading only the thread that changed", async () => {
+  const token = await pair("Rokid_Test");
+  await photo(token, "request-a");
+  await photo(token, "request-b");
+  history = [parent("1000.2"), parent("1000.1")];
+  thread("1000.1", []);
+  thread("1000.2", []);
+  // Every feed request asks Slack for history; threads are re-read only on change.
+  await restart({ freshMs: 0, resyncMs: 60_000 });
+
+  assert.equal((await feed(token)).statusCode, 200);
+  assert.deepEqual(replyCalls.sort(), ["1000.1", "1000.2"]);
+  await feed(token);
+  await feed(token);
+  assert.equal(replyCalls.length, 2, "unchanged threads cost no Slack call");
+  assert.equal(historyCalls, 3);
+
+  thread("1000.1", [reply("1000.5", "1000.1", "バルブを閉めてください")]);
+  const posts = (await feed(token)).json().posts;
+  assert.ok(
+    posts.some((p: { text: string }) => p.text === "バルブを閉めてください"),
+  );
+  assert.deepEqual(replyCalls.slice(2), ["1000.1"]);
+
+  // A deleted reply lowers the count even though no newer reply exists.
+  thread("1000.1", []);
+  const afterDelete = (await feed(token)).json().posts;
+  assert.ok(
+    !afterDelete.some(
+      (p: { text: string }) => p.text === "バルブを閉めてください",
+    ),
+  );
+  assert.deepEqual(replyCalls.slice(3), ["1000.1"]);
+});
+
+test("edited replies and threads outside channel history are still picked up by the periodic re-read", async () => {
+  const token = await pair("Rokid_Test");
+  await photo(token);
+  // The parent has scrolled out of the newest 100 messages: history says nothing about it.
+  history = [];
+  threads["1000.1"] = [
+    parent("1000.1"),
+    reply("1000.5", "1000.1", "確認します"),
+  ];
+  await restart({ freshMs: 0, resyncMs: 40 });
+  const text = async () =>
+    (await feed(token))
+      .json()
+      .posts.map((p: { text: string }) => p.text)
+      .join("|");
+
+  assert.match(await text(), /確認します/);
+  threads["1000.1"] = [
+    parent("1000.1"),
+    reply("1000.5", "1000.1", "確認しました"),
+  ];
+  assert.match(await text(), /確認します/, "within the re-read interval");
+  await new Promise((done) => setTimeout(done, 60));
+  assert.match(await text(), /確認しました/);
+});
+
+test("a waiting feed request answers as soon as a reply arrives, not at the next device poll", async () => {
+  const token = await pair("Rokid_Test");
+  await photo(token);
+  history = [parent("1000.1")];
+  thread("1000.1", []);
+  await restart({ freshMs: 20, resyncMs: 60_000 });
+  const first = (await feed(token)).json();
+  assert.equal(typeof first.version, "string");
+
+  const started = Date.now();
+  const waiting = feed(token, `?since=${first.version}&wait=5`);
+  await new Promise((done) => setTimeout(done, 80));
+  thread("1000.1", [reply("1000.7", "1000.1", "追加で撮影してください")]);
+  const changed = (await waiting).json();
+
+  assert.ok(Date.now() - started < 2_000, "must not wait out the full 5s");
+  assert.notEqual(changed.version, first.version);
+  assert.ok(
+    changed.posts.some(
+      (p: { text: string }) => p.text === "追加で撮影してください",
+    ),
+  );
+});
+
+test("a waiting feed request returns the same version at its deadline and never waits without a version", async () => {
+  const token = await pair("Rokid_Test");
+  await restart({ freshMs: 20, resyncMs: 60_000 });
+  const first = (await feed(token)).json();
+
+  let started = Date.now();
+  const unchanged = (
+    await feed(token, `?since=${first.version}&wait=0.2`)
+  ).json();
+  assert.ok(Date.now() - started >= 150);
+  assert.equal(unchanged.version, first.version);
+
+  // A device that has not shown anything yet, or already holds an old version, is answered at once.
+  for (const query of ["?wait=5", "?since=outdated&wait=5"]) {
+    started = Date.now();
+    assert.equal((await feed(token, query)).statusCode, 200);
+    assert.ok(Date.now() - started < 1_000);
+  }
+});
+
+test("a device revoked while its feed request is waiting receives no further channel content", async () => {
+  const token = await pair("Rokid_Test");
+  await restart({ freshMs: 20, resyncMs: 60_000 });
+  const first = (await feed(token)).json();
+  const waiting = feed(token, `?since=${first.version}&wait=5`);
+  const page = await app.inject({ url: "/slack" });
+  const csrf = /name="csrf" value="([^"]+)"/.exec(page.body)?.[1] ?? "";
+  const device = /name="device" value="([^"]+)"/.exec(page.body)?.[1] ?? "";
+  await app.inject({
+    method: "POST",
+    url: "/slack/revoke",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    payload: new URLSearchParams({ csrf, device }).toString(),
+  });
+
+  const result = await waiting;
+  assert.equal(result.statusCode, 401);
+  assert.equal(result.json().posts, undefined);
+});
+
+test("no photo bytes leave the PC when the destination check fails", async () => {
+  const token = await pair("Rokid_Test");
+  member = false;
+
+  assert.equal((await photo(token)).statusCode, 503);
+  assert.equal(transfers, 0);
+  assert.equal(uploads, 0);
+
+  member = true;
+  assert.equal((await photo(token)).statusCode, 200);
+  assert.equal(transfers, 1);
+});
+
+test("a waiting feed request abandoned by the device stops asking Slack", async () => {
+  const token = await pair("Rokid_Test");
+  await restart({ freshMs: 20, resyncMs: 60_000 });
+  // A real socket: the glasses drop the connection when the screen turns off mid-wait.
+  const address = await app.listen({ host: "127.0.0.1", port: 0 });
+  const headers = { authorization: `Bearer ${token}` };
+  const pause = (ms: number) => new Promise((done) => setTimeout(done, ms));
+  const first = (await (
+    await fetch(`${address}/api/slack/feed`, { headers })
+  ).json()) as { version: string };
+
+  const abandoned = new AbortController();
+  const waiting = fetch(
+    `${address}/api/slack/feed?since=${first.version}&wait=5`,
+    { headers, signal: abandoned.signal },
+  ).catch(() => undefined);
+  await pause(100);
+  assert.ok(historyCalls > 2, "Slack is checked while the device waits");
+  abandoned.abort();
+  await waiting;
+  await pause(100);
+
+  const settled = historyCalls;
+  await pause(200);
+  assert.equal(historyCalls, settled);
+});
+
+test("a thread is not re-read on every check when history and the replies API describe its parent differently", async () => {
+  const token = await pair("Rokid_Test");
+  await photo(token);
+  const answer = reply("1000.5", "1000.1", "確認します");
+  // History carries no thread summary for this parent; the replies API does.
+  history = [parent("1000.1")];
+  threads["1000.1"] = [parent("1000.1", [answer]), answer];
+  await restart({ freshMs: 0, resyncMs: 60_000 });
+
+  for (let i = 0; i < 4; i++) assert.equal((await feed(token)).statusCode, 200);
+
+  // Otherwise 20 watched threads would be read 20 times a minute each and hit the rate limit.
+  assert.deepEqual(replyCalls, ["1000.1"]);
 });

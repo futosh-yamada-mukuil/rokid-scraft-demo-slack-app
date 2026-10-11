@@ -5,7 +5,28 @@ import argparse
 import os
 import platform
 import re
+import subprocess
+import sys
 from pathlib import Path
+
+
+def host_abi() -> str:
+    """このマシンで動くAVDのABI。
+
+    `platform.machine()` はPython自身のアーキテクチャを返す。Apple SiliconのMacでIntel版のPython
+    （pyenv等、Rosetta上）を使うと x86_64 になり、起動できないx86_64のAVDを作ってしまう。
+    macOSではCPUそのものを確かめる。
+    """
+    if platform.machine().lower() in ("arm64", "aarch64"):
+        return "arm64-v8a"
+    if sys.platform == "darwin":
+        try:
+            probe = subprocess.run(["sysctl", "-n", "hw.optional.arm64"], capture_output=True, text=True, timeout=5)
+            if probe.stdout.strip() == "1":
+                return "arm64-v8a"
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return "x86_64"
 
 
 def create_avd(sdk: Path, avd_home: Path, name: str) -> Path:
@@ -23,9 +44,17 @@ def create_avd(sdk: Path, avd_home: Path, name: str) -> Path:
             ("hw.lcd.width", "480"), ("hw.lcd.height", "640"), ("hw.lcd.density", "240"),
         )):
             raise ValueError(f"既存の{name}は480×640 / 240dpiではありません。別名を指定してください。")
+        existing_abi = config.get("abi.type")
+        if existing_abi and existing_abi != host_abi():
+            # そのまま返すとEmulatorが仮想化の初期化エラーで落ち、原因が分かりにくい。
+            raise ValueError(
+                f"既存の{name}は{existing_abi}用で、このマシン（{host_abi()}）では起動できません。"
+                f"Android StudioのDevice Managerで{name}を削除して再実行するか、"
+                "ROKID_AVD_NAME=<別名> を指定してください。"
+            )
         return directory
 
-    arch = "arm64-v8a" if platform.machine().lower() in ("arm64", "aarch64") else "x86_64"
+    arch = host_abi()
     candidates = []
     for image in (sdk / "system-images").glob(f"android-*/*/{arch}"):
         api = image.parent.parent.name.removeprefix("android-")
@@ -48,7 +77,9 @@ def create_avd(sdk: Path, avd_home: Path, name: str) -> Path:
         "avd.ini.displayname": name,
         "avd.ini.encoding": "UTF-8",
         "abi.type": arch,
-        "hw.cpu.arch": arch,
+        # ABI名（arm64-v8a）ではなくCPU名。arm64-v8a と書くとEmulatorが
+        # 「CPU Architecture 'arm64-v8a' is not supported」で起動を拒否する。
+        "hw.cpu.arch": "arm64" if arch == "arm64-v8a" else arch,
         "hw.cpu.ncore": "4",
         "hw.ramSize": "2048",
         "vm.heapSize": "256",

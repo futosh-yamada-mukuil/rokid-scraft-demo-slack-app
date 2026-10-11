@@ -72,7 +72,10 @@ class AppContainer(
     /** PC中継サーバへの端末登録。SlackのBotトークンはAPKに入れない。 */
     val slackAuth: SlackAuth by lazy { SlackAuth(tokenStore) }
 
-    val slackClient: SlackRelayClient by lazy { SlackRelayClient(slackAuth) }
+    /** 翻訳と、中継サーバの変化待ちを共有するアプリ全体のスコープ。 */
+    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    val slackClient: SlackRelayClient by lazy { SlackRelayClient(slackAuth, scope = appScope) }
 
     /** 送信先は Slack のみ。未設定でも HTTP モニターへフォールバックしない。 */
     val sinks: List<MediaSink> =
@@ -102,8 +105,7 @@ class AppContainer(
     private fun channelKey(): String =
         "slack/${BuildConfig.SLACK_RELAY_URL}/${BuildConfig.SLACK_WORKSPACE_ID}/${BuildConfig.SLACK_CHANNEL_ID}"
 
-    private val translationScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private val translationCache by lazy { FeedTranslationCache(translator, translationScope) }
+    private val translationCache by lazy { FeedTranslationCache(translator, appScope) }
     val lobbyRepository: FeedRepository by lazy {
         uiPreview?.repository ?: TranslatedFeedRepository(
             source = slackClient,

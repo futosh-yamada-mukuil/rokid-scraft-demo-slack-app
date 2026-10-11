@@ -125,7 +125,12 @@ fun CameraPreview(
         val future = ProcessCameraProvider.getInstance(ctx)
         future.addListener({
             if (disposed) return@addListener
-            val provider = future.get()
+            // CameraX の初期化失敗は get() が例外で返す。メインスレッドで投げっぱなしにするとアプリごと落ちる。
+            val provider =
+                runCatching { future.get() }.getOrElse {
+                    onError(it)
+                    return@addListener
+                }
             val imageCapture =
                 ImageCapture
                     .Builder()

@@ -3,6 +3,7 @@ package com.scraft.glassreport.net.gstt
 import com.scraft.glassreport.BuildConfig
 import com.scraft.glassreport.capture.asr.WAV_HEADER_BYTES
 import com.scraft.glassreport.capture.asr.WavTranscriber
+import com.scraft.glassreport.domain.text.TranscriptText
 import com.scraft.glassreport.net.AndroidAppIdentity
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.Call
@@ -123,15 +124,14 @@ internal fun parseSttResponse(body: String): Result<String> =
         val response = JSONObject(body)
         require(!response.has("error")) { "Google STT応答エラー" }
         val results = response.optJSONArray("results") ?: return@runCatching ""
-        (0 until results.length())
-            .mapNotNull { index ->
+        // A pause splits one comment into several results; Japanese/Chinese must not gain spaces there.
+        TranscriptText.join(
+            (0 until results.length()).mapNotNull { index ->
                 results
-                    .optJSONObject(
-                        index,
-                    )?.optJSONArray("alternatives")
+                    .optJSONObject(index)
+                    ?.optJSONArray("alternatives")
                     ?.optJSONObject(0)
                     ?.optString("transcript")
-                    ?.trim()
-                    ?.takeIf(String::isNotBlank)
-            }.joinToString(" ")
+            },
+        )
     }.recoverCatching { throw IOException("Google STT応答を解釈できません") }

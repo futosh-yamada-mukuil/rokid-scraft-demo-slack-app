@@ -7,7 +7,9 @@ import com.scraft.glassreport.domain.translate.TranslationException
 import com.scraft.glassreport.domain.translate.Translator
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -144,6 +146,100 @@ class FeedTranslationCacheTest {
                     .text,
             )
             assertEquals(1, fetches)
+        }
+
+    @Test fun sourceAnnouncementIsRelayedAndBypassesTheReuseWindowOnce() =
+        runTest {
+            // A reply announced by the relay must be fetched now, not when the 3 s reuse window ends.
+            var fetches = 0
+            val announcements = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+            val repo =
+                TranslatedFeedRepository(
+                    object : FeedRepository {
+                        override val updates = announcements
+
+                        override suspend fun latest(): Result<List<FeedPost>> {
+                            fetches++
+                            return Result.success(listOf(post(id = "$fetches")))
+                        }
+                    },
+                    FeedTranslationCache(FakeTranslator(), backgroundScope),
+                    { "a" },
+                    { SpeechLanguage.EN },
+                    emptyFlow(),
+                    clock = { 10_000_000L },
+                )
+            var relayed = 0
+            backgroundScope.launch { repo.updates.collect { relayed++ } }
+            repo.latest()
+            repo.latest()
+            runCurrent()
+            assertEquals(1, fetches)
+
+            announcements.emit(Unit)
+            runCurrent()
+            assertTrue(relayed >= 1)
+            assertEquals(
+                "2",
+                repo
+                    .latest()
+                    .getOrThrow()
+                    .single()
+                    .id,
+            )
+            repo.latest()
+            assertEquals(2, fetches)
+        }
+
+    @Test fun clockMovingBackwardsNeitherFreezesTheFeedNorTheTranslationRetry() =
+        runTest {
+            // The glasses correct their clock after boot; intervals must not wait for it to catch up.
+            var now = 10_000_000L
+            var fetches = 0
+            val translator = FakeTranslator().apply { fail = true }
+            val cache = FeedTranslationCache(translator, backgroundScope, clock = { now })
+            val repo =
+                TranslatedFeedRepository(
+                    object : FeedRepository {
+                        override suspend fun latest(): Result<List<FeedPost>> {
+                            fetches++
+                            return Result.success(listOf(post()))
+                        }
+                    },
+                    cache,
+                    { "a" },
+                    { SpeechLanguage.EN },
+                    emptyFlow(),
+                    clock = { now },
+                )
+            repo.latest()
+            runCurrent()
+            assertEquals(
+                TranslationState.FAILED,
+                repo
+                    .latest()
+                    .getOrThrow()
+                    .single()
+                    .translation,
+            )
+            assertEquals(1, fetches)
+            assertEquals(1, translator.calls.size)
+
+            now -= 3_600_000L
+            translator.fail = false
+            repo.latest()
+            runCurrent()
+
+            assertEquals(2, fetches)
+            assertEquals(2, translator.calls.size)
+            assertEquals(
+                "EN:请检查照片",
+                repo
+                    .latest()
+                    .getOrThrow()
+                    .single()
+                    .text,
+            )
         }
 
     @Test fun notificationsBaselinePendingHistoryButWaitForNewTranslation() {

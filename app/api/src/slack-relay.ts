@@ -41,8 +41,36 @@ export type SlackPost = {
   isOwn: boolean;
 };
 
+/** One watched photo thread, kept between refreshes so unchanged threads cost no Slack call. */
+type Thread = {
+  messages: SlackMessage[];
+  latestReply?: string;
+  replyCount: number;
+  fetchedAt: number;
+};
+
+/**
+ * Polling cadence. Slack allows roughly 50 calls a minute per method for internal apps:
+ * one history call every `freshMs` (20/min) reveals new replies through the parents'
+ * `latest_reply`, and every watched thread is still re-read each `resyncMs` (at most 40/min for
+ * 20 threads, as before) to pick up edits, deletions and parents that left the history window.
+ */
+export type SlackRelayTiming = {
+  freshMs: number;
+  resyncMs: number;
+  maxWaitMs: number;
+};
+const DEFAULT_TIMING: SlackRelayTiming = {
+  freshMs: 3_000,
+  resyncMs: 30_000,
+  maxWaitMs: 25_000,
+};
+
 const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 const MAX_PHOTO = 16 * 1024 * 1024;
+const WATCHED_THREADS = 20;
+const THREAD_FETCHES = 4;
+const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
 const hash = (value: string) =>
   createHash("sha256").update(value).digest("hex");
 const escapeHtml = (s: string) =>
@@ -69,9 +97,12 @@ export class SlackRelay {
     replies: Map<string, SlackMessage[]>;
   };
   private refreshing?: Promise<NonNullable<SlackRelay["cache"]>>;
+  private readonly threads = new Map<string, Thread>();
+  private readonly timing: SlackRelayTiming;
 
-  constructor(slack: SlackClient) {
+  constructor(slack: SlackClient, timing: Partial<SlackRelayTiming> = {}) {
     this.slack = slack;
+    this.timing = { ...DEFAULT_TIMING, ...timing };
     const path = slack.config.statePath;
     if (existsSync(path)) {
       const saved = JSON.parse(readFileSync(path, "utf8")) as State;
@@ -412,13 +443,42 @@ export class SlackRelay {
       },
     );
 
+    // `since` + `wait` hold the request until this device's feed differs from the version it
+    // already shows, so a reply reaches the glasses on the next Slack check instead of the next
+    // device poll. Without them the answer is immediate, as before.
     app.get("/api/slack/feed", async (req, reply) => {
       const device = this.device(req, reply);
       if (!device) return;
+      const query = req.query as { since?: unknown; wait?: unknown };
+      const since = typeof query.since === "string" ? query.since : "";
+      const wait = Math.min(
+        Math.max(Number(query.wait) || 0, 0) * 1000,
+        this.timing.maxWaitMs,
+      );
+      const deadline = Date.now() + (since ? wait : 0);
+      const version = (posts: SlackPost[]) =>
+        hash(JSON.stringify(posts)).slice(0, 32);
       try {
+        let posts = await this.feed(device);
+        while (version(posts) === since && Date.now() < deadline) {
+          await sleep(
+            Math.min(
+              deadline - Date.now(),
+              Math.max((this.cache?.until ?? 0) - Date.now(), 20),
+            ),
+          );
+          // A device revoked while waiting must not keep receiving the channel.
+          if (!this.state.devices.some((d) => d.id === device.id)) {
+            reply.code(401).send({ error: "Slack端末をPCで登録してください" });
+            return;
+          }
+          // Nobody is listening any more: answer with what is known instead of asking Slack again.
+          if (req.raw.socket?.destroyed) break;
+          posts = await this.feed(device);
+        }
         reply
           .header("cache-control", "no-store")
-          .send({ posts: await this.feed(device) });
+          .send({ posts, version: version(posts) });
       } catch (error) {
         await this.error(reply, error);
       }
@@ -440,29 +500,34 @@ export class SlackRelay {
         if (record.threadTs) dirty = true;
       }
       if (dirty) this.save();
-      const replies = new Map<string, SlackMessage[]>();
       // Bound Slack API usage. Watch the 20 most recent uploaded threads, including old parents outside history.
-      const watched = this.state.uploads
-        .filter(
-          (u) =>
-            u.threadTs &&
-            this.state.devices.some(
-              (d) => d.id === u.device && d.channel === this.channelKey,
-            ),
-        )
-        .slice(-20);
-      for (const record of watched) {
-        const ts = record.threadTs;
-        if (!ts || replies.has(ts)) continue;
-        try {
-          replies.set(ts, await this.slack.replies(ts));
-        } catch (error) {
-          if (error instanceof SlackError && error.code === "thread_not_found")
-            continue;
-          throw error;
-        }
+      const watched = [
+        ...new Set(
+          this.state.uploads
+            .filter(
+              (u) =>
+                u.threadTs &&
+                this.state.devices.some(
+                  (d) => d.id === u.device && d.channel === this.channelKey,
+                ),
+            )
+            .slice(-WATCHED_THREADS)
+            .map((u) => u.threadTs as string),
+        ),
+      ];
+      for (const ts of this.threads.keys())
+        if (!watched.includes(ts)) this.threads.delete(ts);
+      await this.readThreads(this.changedThreads(watched, messages), messages);
+      const replies = new Map<string, SlackMessage[]>();
+      for (const ts of watched) {
+        const thread = this.threads.get(ts);
+        if (thread) replies.set(ts, thread.messages);
       }
-      const fresh = { until: Date.now() + 30_000, messages, replies };
+      const fresh = {
+        until: Date.now() + this.timing.freshMs,
+        messages,
+        replies,
+      };
       this.cache = fresh;
       return fresh;
     })();
@@ -471,6 +536,57 @@ export class SlackRelay {
     } finally {
       this.refreshing = undefined;
     }
+  }
+
+  /**
+   * Threads worth a `conversations.replies` call: never read, due for the periodic re-read, or
+   * whose parent in the channel history reports a different last reply than the copy held here.
+   */
+  private changedThreads(watched: string[], history: SlackMessage[]): string[] {
+    const now = Date.now();
+    return watched.filter((ts) => {
+      const known = this.threads.get(ts);
+      if (!known || now - known.fetchedAt >= this.timing.resyncMs) return true;
+      const parent = history.find((m) => m.ts === ts);
+      return (
+        parent !== undefined &&
+        (parent.latest_reply !== known.latestReply ||
+          (parent.reply_count ?? 0) !== known.replyCount)
+      );
+    });
+  }
+
+  /** A few threads at a time: quicker than one by one, without a burst against the rate limit. */
+  private async readThreads(
+    stale: string[],
+    history: SlackMessage[],
+  ): Promise<void> {
+    const queue = [...stale];
+    const worker = async () => {
+      for (let ts = queue.shift(); ts; ts = queue.shift()) {
+        let messages: SlackMessage[] = [];
+        try {
+          messages = await this.slack.replies(ts);
+        } catch (error) {
+          if (
+            !(error instanceof SlackError && error.code === "thread_not_found")
+          )
+            throw error;
+        }
+        // Remember the summary exactly as channel history reported it. The next check compares
+        // history with history, so it cannot loop if the replies API describes the parent differently.
+        const parent = history.find((m) => m.ts === ts);
+        this.threads.set(ts, {
+          messages,
+          latestReply: parent?.latest_reply,
+          replyCount: parent?.reply_count ?? 0,
+          fetchedAt: Date.now(),
+        });
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(THREAD_FETCHES, queue.length) }, worker),
+    );
   }
 
   private async feed(device: Device): Promise<SlackPost[]> {

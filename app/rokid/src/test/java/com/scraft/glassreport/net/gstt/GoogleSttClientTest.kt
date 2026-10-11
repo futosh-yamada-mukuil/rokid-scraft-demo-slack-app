@@ -74,6 +74,16 @@ class GoogleSttClientTest {
             assertTrue(parseSttResponse("bad json").isFailure)
         }
 
+    @Test fun utterancesSplitByAPauseAreJoinedWithoutSpacesInJapanese() {
+        fun results(vararg transcripts: String) =
+            """{"results":[${transcripts.joinToString(",") { """{"alternatives":[{"transcript":"$it"}]}""" }}]}"""
+        assertEquals("バルブを閉めました。圧力は正常です", parseSttResponse(results("バルブを閉めました。", " 圧力は正常です")).getOrThrow())
+        assertEquals("エラー発生", parseSttResponse(results("エラー 発生")).getOrThrow())
+        assertEquals("valve closed pressure is normal", parseSttResponse(results("valve closed", "pressure is normal")).getOrThrow())
+        assertEquals("확인했습니다 사진 보냅니다", parseSttResponse(results("확인했습니다", "사진 보냅니다")).getOrThrow())
+        assertEquals("", parseSttResponse("""{"results":[{"alternatives":[{}]},{}]}""").getOrThrow())
+    }
+
     @Test fun cancellationStopsAnInFlightRequest() =
         runTest {
             MockWebServer().use { server ->

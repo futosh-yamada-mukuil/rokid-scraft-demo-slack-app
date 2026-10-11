@@ -31,6 +31,11 @@ esac
 adb="$ANDROID_HOME/platform-tools/adb"
 emulator="$ANDROID_HOME/emulator/emulator"
 [[ -x "$adb" && -x "$emulator" ]] || { echo "Android StudioのSDK ManagerでAndroid EmulatorとPlatform-Toolsをインストールしてください。" >&2; exit 1; }
+# Apple SiliconのMacにIntel版のEmulatorが入っていると、起動時に「failed to initialize HVF」で落ちる。
+if [[ "$(uname -s)" == "Darwin" && "$(sysctl -n hw.optional.arm64 2>/dev/null)" == "1" ]] && ! file "$emulator" | grep -q "arm64"; then
+    echo "このMacはApple Siliconですが、Android EmulatorがIntel版です。Android StudioのSDK ManagerでAndroid Emulatorを入れ直し、arm64-v8aのシステムイメージ（Android 12 / API 32）を追加してください。" >&2
+    exit 1
+fi
 command -v python3 >/dev/null || { echo "Python 3が必要です。" >&2; exit 1; }
 camera="$(python3 scripts/emulator-media.py camera --emulator "$emulator" --requested "$requested_camera")"
 python3 scripts/create-rokid-avd.py --sdk "$ANDROID_HOME" --name "$avd_name"
