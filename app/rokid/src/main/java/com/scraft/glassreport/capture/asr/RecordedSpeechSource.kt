@@ -21,6 +21,8 @@ class RecordedSpeechSource(
     override fun beginRecording(durationMs: Long?): SpeechRecordingSession {
         val stop = VoiceStopSignal()
         activeStop = stop
+        // 録音している数秒のあいだに認識の準備を済ませ、録音後の待ちを縮める。
+        if (available) transcriber.prepare()
         return object : SpeechRecordingSession {
             override fun stop() = stop.stop()
 
@@ -30,8 +32,10 @@ class RecordedSpeechSource(
                 } catch (
                     cancel: CancellationException,
                 ) {
+                    transcriber.cancelPrepared()
                     throw cancel
                 } catch (error: Exception) {
+                    transcriber.cancelPrepared()
                     Result.failure(error)
                 } finally {
                     if (activeStop === stop) activeStop = null
@@ -41,6 +45,7 @@ class RecordedSpeechSource(
 
     override suspend fun transcribe(voice: RecordedVoice): Result<SpeechResult> {
         if (voice.wav.size <= WAV_HEADER_BYTES || voice.silent) {
+            transcriber.cancelPrepared()
             return Result.success(SpeechResult("", voice.durationMs, 0, true, voice.wav))
         }
         if (!available) return Result.failure(IllegalStateException(unavailableReason))

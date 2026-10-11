@@ -8,8 +8,11 @@ import com.k2fsa.sherpa.onnx.OfflineModelConfig
 import com.k2fsa.sherpa.onnx.OfflineRecognizer
 import com.k2fsa.sherpa.onnx.OfflineRecognizerConfig
 import com.k2fsa.sherpa.onnx.OfflineSenseVoiceModelConfig
+import com.scraft.glassreport.domain.text.TranscriptText
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -37,69 +40,59 @@ class OfflineWavTranscriber(
     override val available: Boolean get() = assetsPresent
     override val unavailableReason: String get() = "オフライン音声認識モデルがAPKにありません"
 
+    /** 録音中に読み込んでおいた認識器。使われなければ [WARM_HOLD_MS] 後に解放する。 */
+    private val warm =
+        PreparedResource(
+            scope = warmScope,
+            lock = recognizerLock,
+            holdMs = WARM_HOLD_MS,
+            create = { loadRecognizer() },
+            release = { it.release() },
+            // 保持中もカメラを再バインドさせない（モデルとカメラを同時に抱えると端末が LMK に掛かる）。
+            onHeldChanged = { held -> mutableBusy.value = held },
+            onError = { Log.w(TAG, "Offline STT warm-up skipped: ${it.javaClass.simpleName}") },
+        )
+
+    override fun prepare() {
+        if (available) warm.prepare()
+    }
+
+    override fun cancelPrepared() = warm.discard()
+
     override suspend fun transcribe(wav: ByteArray): Result<String> =
         withContext(Dispatchers.IO) {
             // A process-wide lock also prevents overlapping recognizers after screen recreation.
             recognizerLock.withLock {
+                // Loaded while recording, if prepare() ran. Owned here from now on: every path below releases it.
+                var recognizer: OfflineRecognizer? = warm.takeLocked()
+                val warmed = recognizer != null
                 mutableBusy.value = true
                 try {
                     check(available) { unavailableReason }
                     val samples = OfflinePcmWav.samples(wav)
                     if (samples.isEmpty() || samples.all { it == 0f }) return@withLock Result.success("")
                     currentCoroutineContext().ensureActive()
-                    val memory = ActivityManager.MemoryInfo()
-                    appContext.getSystemService(ActivityManager::class.java).getMemoryInfo(memory)
-                    check(!memory.lowMemory && memory.availMem >= MIN_AVAILABLE_MEMORY) {
-                        "オフライン認識用メモリが不足しています。カメラを閉じて再試行してください"
-                    }
                     val started = SystemClock.elapsedRealtime()
-                    // File loading avoids an extra full model byte array through AssetManager/JNI.
-                    val modelDirectory = installModels()
+                    val loaded = recognizer ?: loadRecognizer().also { recognizer = it }
                     currentCoroutineContext().ensureActive()
-                    val recognizer =
-                        OfflineRecognizer(
-                            config =
-                                OfflineRecognizerConfig(
-                                    modelConfig =
-                                        OfflineModelConfig(
-                                            senseVoice =
-                                                OfflineSenseVoiceModelConfig(
-                                                    model = File(modelDirectory, MODEL_FILES[0]).absolutePath,
-                                                    language = "auto", // Independent of display/translation language.
-                                                    useInverseTextNormalization = true,
-                                                ),
-                                            tokens = File(modelDirectory, MODEL_FILES[1]).absolutePath,
-                                            numThreads = 2,
-                                            provider = "cpu",
-                                            debug = false,
-                                        ),
-                                ),
-                        )
+                    val stream = loaded.createStream()
                     try {
+                        // Short tap-stop recordings may end at a phoneme boundary. Symmetric 250ms
+                        // silence preserves all recorded samples and stabilizes automatic decoding.
+                        val padded = FloatArray(samples.size + 2 * BOUNDARY_SAMPLES)
+                        samples.copyInto(padded, BOUNDARY_SAMPLES)
+                        stream.acceptWaveform(padded, 16000)
+                        loaded.decode(stream)
                         currentCoroutineContext().ensureActive()
-                        val stream = recognizer.createStream()
-                        try {
-                            // Short tap-stop recordings may end at a phoneme boundary. Symmetric 250ms
-                            // silence preserves all recorded samples and stabilizes automatic decoding.
-                            val padded = FloatArray(samples.size + 2 * BOUNDARY_SAMPLES)
-                            samples.copyInto(padded, BOUNDARY_SAMPLES)
-                            stream.acceptWaveform(padded, 16000)
-                            recognizer.decode(stream)
-                            currentCoroutineContext().ensureActive()
-                            val text =
-                                recognizer
-                                    .getResult(stream)
-                                    .text
-                                    .trim()
-                                    .replace(JAPANESE_WORD_SPACES, "")
-                            Log.i(TAG, "Offline STT completed elapsedMs=${SystemClock.elapsedRealtime() - started} samples=${samples.size}")
-                            Result.success(text)
-                        } finally {
-                            stream.release()
-                        }
+                        val text = TranscriptText.fromOfflineRecognizer(loaded.getResult(stream).text)
+                        Log.i(
+                            TAG,
+                            "Offline STT completed elapsedMs=${SystemClock.elapsedRealtime() - started} " +
+                                "samples=${samples.size} warmed=$warmed",
+                        )
+                        Result.success(text)
                     } finally {
-                        // Never retain the model weights while returning to the camera or lobby.
-                        recognizer.release()
+                        stream.release()
                     }
                 } catch (cancelled: CancellationException) {
                     throw cancelled
@@ -110,14 +103,47 @@ class OfflineWavTranscriber(
                 } catch (failure: OutOfMemoryError) {
                     Result.failure(IllegalStateException("オフライン認識用メモリが不足しています。時間をおいて再試行してください", failure))
                 } finally {
+                    // Never retain the model weights while returning to the camera or lobby.
+                    recognizer?.release()
                     mutableBusy.value = false
                 }
             }
         }
 
-    // Resources live only inside transcribe's try/finally. Releasing JNI from another thread
-    // during decode causes a native crash, so cancellation is handled by its owning coroutine.
-    override fun close() = Unit
+    /** Checks memory, unpacks the model on first use and loads it. Call with [recognizerLock] held. */
+    private suspend fun loadRecognizer(): OfflineRecognizer {
+        val memory = ActivityManager.MemoryInfo()
+        appContext.getSystemService(ActivityManager::class.java).getMemoryInfo(memory)
+        check(!memory.lowMemory && memory.availMem >= MIN_AVAILABLE_MEMORY) {
+            "オフライン認識用メモリが不足しています。カメラを閉じて再試行してください"
+        }
+        // File loading avoids an extra full model byte array through AssetManager/JNI.
+        val modelDirectory = installModels()
+        currentCoroutineContext().ensureActive()
+        return OfflineRecognizer(
+            config =
+                OfflineRecognizerConfig(
+                    modelConfig =
+                        OfflineModelConfig(
+                            senseVoice =
+                                OfflineSenseVoiceModelConfig(
+                                    model = File(modelDirectory, MODEL_FILES[0]).absolutePath,
+                                    language = "auto", // Independent of display/translation language.
+                                    useInverseTextNormalization = true,
+                                ),
+                            tokens = File(modelDirectory, MODEL_FILES[1]).absolutePath,
+                            numThreads = 2,
+                            provider = "cpu",
+                            debug = false,
+                        ),
+                ),
+        )
+    }
+
+    // A recognizer in use lives only inside transcribe's try/finally. Releasing JNI from another
+    // thread during decode causes a native crash, so only a prepared, unused one is dropped here
+    // (and only under recognizerLock, never while decoding).
+    override fun close() = warm.discard()
 
     private fun installModels(): File {
         val directory = File(appContext.noBackupFilesDir, "offline-stt-sensevoice-int8-c71f0ce")
@@ -145,11 +171,13 @@ class OfflineWavTranscriber(
         private const val ASSET_DIRECTORY = "offline-stt"
         private const val MIN_AVAILABLE_MEMORY = 600L * 1024 * 1024
         private const val BOUNDARY_SAMPLES = 4_000
-        private val JAPANESE_WORD_SPACES =
-            Regex("(?<=[\\p{IsHan}\\p{IsHiragana}\\p{IsKatakana}])\\s+(?=[\\p{IsHan}\\p{IsHiragana}\\p{IsKatakana}])")
         private val MODEL_FILES = listOf("sensevoice-model.int8.onnx", "sensevoice-tokens.txt")
         private val MODEL_LENGTHS = listOf(239233841L, 315894L)
+
+        /** How long a recognizer loaded during recording is kept when nothing asks for it. */
+        private const val WARM_HOLD_MS = 10_000L
         private val recognizerLock = Mutex()
+        private val warmScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         private val mutableBusy = MutableStateFlow(false)
         val busy: StateFlow<Boolean> = mutableBusy.asStateFlow()
     }
