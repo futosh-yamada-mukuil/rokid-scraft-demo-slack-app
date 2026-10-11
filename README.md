@@ -1,4 +1,4 @@
-# MUKUIL 現場レポート
+# rokid-scraft-demo-slack-app
 
 Rokid Glasses／Androidで写真を撮り、PC中継サーバ経由でSlackのプライベートチャンネルへ共有する展示会向けデモです。
 

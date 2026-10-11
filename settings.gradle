@@ -15,7 +15,7 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "scraft-glass"
+rootProject.name = "rokid-scraft-demo-slack-app"
 
 // モノレポ構成: app/rokid だけを Gradle で管理する。
 // app/api・app/web・app/shared は pnpm workspace 側で管理するため、ここには含めない。
