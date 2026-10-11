@@ -34,6 +34,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -88,6 +89,8 @@ fun HomeScreen(
     var connectionError by remember { mutableStateOf(false) }
     var signInPrompted by rememberSaveable { mutableStateOf(false) }
     var retryGeneration by remember { mutableIntStateOf(0) }
+    // 経過時間（「3分前」）の基準。投稿が増えなくても時間は進むので、更新のたびに進めて表示を追従させる。
+    var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
     val retryNow = {
         status = "接続中…"
         connectionError = false
@@ -99,6 +102,7 @@ fun HomeScreen(
     LaunchedEffect(lifecycleOwner, repository, retryGeneration) {
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             repository.refreshes(LOBBY_POLL_MS).collect {
+                nowMs = System.currentTimeMillis()
                 if (!container.channelConfigured) {
                     connected = false
                     signInRequired = false
@@ -152,6 +156,7 @@ fun HomeScreen(
         onHide = onHide,
         onExit = onExit,
         onBack = onBack,
+        nowMs = nowMs,
     )
 }
 
@@ -172,6 +177,8 @@ internal fun HomeChatContent(
     onSignIn: () -> Unit = {},
     onRetry: () -> Unit = {},
     menuInitiallyOpen: Boolean = false,
+    /** 経過時間の基準時刻。呼び出し側が進めないと、吹き出しは再描画されず「たった今」のまま残る。 */
+    nowMs: Long = System.currentTimeMillis(),
 ) {
     val scheme = MaterialTheme.colorScheme
     val listState = rememberLazyListState()
@@ -400,7 +407,10 @@ internal fun HomeChatContent(
                             modifier = Modifier.fillMaxSize(),
                             verticalArrangement = Arrangement.spacedBy(8.dp, Alignment.Bottom),
                         ) {
-                            items(posts, key = { it.id }) { post -> TeamBubble(post) }
+                            items(posts, key = { it.id }) { post ->
+                                // 文言にしてから渡す。表示が変わる吹き出し（分の境目を越えたもの）だけが再描画される。
+                                TeamBubble(post, elapsed = post.createdAtMs?.let { RelativeTime.format(it, nowMs) })
+                            }
                         }
                     }
                 }
@@ -497,7 +507,10 @@ internal fun nextHomeEntry(
 }
 
 @Composable
-private fun TeamBubble(post: FeedPost) {
+private fun TeamBubble(
+    post: FeedPost,
+    elapsed: String?,
+) {
     val scheme = MaterialTheme.colorScheme
     val own = post.isOwn == true
     val shape =
@@ -525,9 +538,9 @@ private fun TeamBubble(post: FeedPost) {
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            post.createdAtMs?.let { timestamp ->
+            elapsed?.let { label ->
                 Text(
-                    "  ${RelativeTime.format(timestamp, System.currentTimeMillis())}",
+                    "  $label",
                     style = MaterialTheme.typography.bodySmall,
                     color = scheme.secondary,
                     maxLines = 1,
