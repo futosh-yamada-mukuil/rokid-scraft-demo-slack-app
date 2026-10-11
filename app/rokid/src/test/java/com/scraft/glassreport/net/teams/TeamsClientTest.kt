@@ -186,6 +186,24 @@ class TeamsClientTest {
         }
 
     @Test
+    fun expiredToken_whenRefreshIsTemporarilyUnavailable_keepsTheDraftRetryableWithoutSignIn() =
+        runTest {
+            server.enqueue(MockResponse().setResponseCode(503).setBody("<html>Service Unavailable</html>"))
+            server.enqueue(MockResponse().setBody("""{"access_token":"at-2","expires_in":3600}"""))
+            server.enqueue(MockResponse().setResponseCode(201).setBody(postedJson))
+            val store = InMemoryTokenStore(Tokens("at-old", "rt-1", expiresAt = clock - 1))
+            val teams = client(store)
+
+            val failed = teams.postMessage("再送", byteArrayOf(1))
+
+            // 認証画面へ送る合図（SignInRequiredException）にはしない。撮影画面は下書きを保ったまま再送できる。
+            assertTrue(failed.isFailure)
+            assertFalse(failed.exceptionOrNull() is SignInRequiredException)
+            assertEquals("rt-1", store.load()?.refreshToken)
+            assertTrue(teams.postMessage("再送", byteArrayOf(1)).isSuccess)
+        }
+
+    @Test
     fun missingTokens_askForSignInWithoutCallingGraph() =
         runTest {
             val result = client(InMemoryTokenStore()).postMessage("未サインイン", byteArrayOf(1))

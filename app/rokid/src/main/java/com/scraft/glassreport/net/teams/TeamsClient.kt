@@ -210,9 +210,11 @@ class TeamsClient(
         // Capture the scope once: settings can change while this poll is in flight.
         val scope = messagesUrl()
         val page = fetchMessagePage("$scope?\$top=$limit&\$expand=replies").getOrElse { return Result.failure(it) }
+        // 保存済みトークンの復号と JWT の解釈はスレッド数ぶん繰り返さず、1 回の取得につき 1 度だけ行う。
+        val signedInUserId = auth.signedInUserId()
         return try {
             val parents = page.optJSONArray("value") ?: JSONArray()
-            val roots = parseMessages(parents).distinctBy { it.id }.take(limit)
+            val roots = parseMessages(parents, signedInUserId).distinctBy { it.id }.take(limit)
             val replies = mutableListOf<FeedPost>()
             for (index in 0 until minOf(parents.length(), limit)) {
                 val parent = parents.optJSONObject(index) ?: continue
@@ -246,7 +248,7 @@ class TeamsClient(
                     add(replyPage.optJSONArray("value") ?: JSONArray())
                     next = replyPage.optString("@odata.nextLink").takeIf { it.isNotBlank() }
                 }
-                replies += parseMessages(JSONArray(messages.values.toList()), parentId).take(limit)
+                replies += parseMessages(JSONArray(messages.values.toList()), signedInUserId, parentId).take(limit)
             }
             // Preserve the existing root-post window and add only the latest reply window.
             Result.success(
@@ -299,10 +301,10 @@ class TeamsClient(
      */
     private fun parseMessages(
         values: JSONArray,
+        signedInUserId: String?,
         parentId: String? = null,
     ): List<FeedPost> {
         val posts = ArrayList<FeedPost>(values.length())
-        val signedInUserId = auth.signedInUserId()
         for (i in 0 until values.length()) {
             val message = values.optJSONObject(i) ?: continue
             if (message.optString("messageType") != MESSAGE_TYPE_MESSAGE) continue
@@ -361,15 +363,18 @@ class TeamsClient(
     /**
      * アクセストークンを付けて 1 回投げ、**401 なら 1 度だけ強制更新して再試行**する。
      * 期限内でもトークンが失効することがある（管理者の操作・パスワード変更など）ため。
+     *
+     * トークンを用意できない理由は [TeamsAuth.authorize] が区別して返す。再サインインが要るときだけ
+     * [SignInRequiredException] になり、更新時の通信断は通常の通信エラーとして呼び出し側へ返る。
      */
     private suspend fun sendWithAuth(build: (String) -> Request): Result<HttpResponse> {
-        val token = auth.accessToken() ?: return Result.failure(SignInRequiredException("Teams 未サインイン"))
+        val token = auth.authorize().getOrElse { return Result.failure(it) }
 
         val response = execute(build(token)).getOrElse { return Result.failure(it) }
         if (response.code != 401) return Result.success(response)
 
         Log.i(TAG, "401 のためトークンを更新して再試行する")
-        val refreshed = auth.accessToken(forceRefresh = true) ?: return Result.failure(SignInRequiredException("Teams 未サインイン"))
+        val refreshed = auth.authorize(forceRefresh = true, rejected = token).getOrElse { return Result.failure(it) }
         return execute(build(refreshed))
     }
 

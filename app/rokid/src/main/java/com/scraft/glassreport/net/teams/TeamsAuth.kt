@@ -6,8 +6,11 @@ import com.scraft.glassreport.data.prefs.CURRENT_AUTH_VERSION
 import com.scraft.glassreport.data.prefs.TokenStore
 import com.scraft.glassreport.data.prefs.Tokens
 import com.scraft.glassreport.net.JsonLite
+import com.scraft.glassreport.net.SignInRequiredException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.FormBody
 import okhttp3.OkHttpClient
@@ -39,6 +42,12 @@ private const val SLOW_DOWN_EXTRA_MS = 5_000L
 private const val DEFAULT_EXPIRES_IN_SEC = 3_600L
 private const val DEFAULT_CODE_EXPIRES_IN_SEC = 900L
 private const val DEFAULT_INTERVAL_SEC = 5L
+
+/**
+ * 認証サーバ側の一時障害を表す `error`。人の再サインインでは直らないので、
+ * 通信断と同じく「あとでもう一度試す」に倒す（保存済みトークンは捨てない）。
+ */
+private val TRANSIENT_OAUTH_ERRORS = setOf("temporarily_unavailable", "server_error")
 
 /**
  * `devicecode` の応答。[userCode] を人に見せ、[deviceCode] でポーリングする。
@@ -114,6 +123,12 @@ class TeamsAuth(
     private val now: () -> Long = System::currentTimeMillis,
 ) : SignInFlow {
     private val loginBase = loginBase.trimEnd('/')
+
+    /**
+     * トークンの確認〜更新〜保存を 1 本に直列化する。ロビーの取得と写真の送信が同時に期限切れへ
+     * 当たっても、更新要求は 1 回だけ飛ばし、後から来た方は保存済みの新しいトークンを使う。
+     */
+    private val refreshLock = Mutex()
 
     /** テナント／クライアントが `.env` から入っているか。未設定ならサインイン自体を出さない。 */
     override val configured: Boolean get() = tenantId.isNotBlank() && clientId.isNotBlank()
@@ -206,8 +221,11 @@ class TeamsAuth(
                 ),
             ).getOrElse { return PollResult.Pending() }
 
-        if (JsonLite.string(body, "access_token") != null) {
-            store(body)
+        val granted = JsonLite.string(body, "access_token")
+        if (granted != null) {
+            // 空のトークンを保存すると「完了」と出たのに未サインインへ戻る。保存せず失敗として見せる。
+            if (granted.isBlank()) return PollResult.Failed("サインインに失敗しました")
+            refreshLock.withLock { store(body, granted) }
             return PollResult.Granted
         }
         return when (val error = JsonLite.string(body, "error")) {
@@ -215,52 +233,90 @@ class TeamsAuth(
             "slow_down" -> PollResult.Pending(SLOW_DOWN_EXTRA_MS)
             "expired_token" -> PollResult.Failed("コードの有効期限が切れました")
             "authorization_declined" -> PollResult.Failed("サインインが拒否されました")
-            else -> PollResult.Failed(errorMessage(body) ?: error ?: "サインインに失敗しました")
+            // 認証サーバの一時障害（`error` を持たない 5xx の HTML なども含む）は通信断と同じ扱い。
+            // 人がブラウザで入力済みのコードを無駄にしない。待つのはコードの期限まで。
+            null, in TRANSIENT_OAUTH_ERRORS -> PollResult.Pending()
+            else -> PollResult.Failed(errorMessage(body) ?: error)
         }
     }
 
     /**
      * 投稿に使うアクセストークン。期限が近ければ `refresh_token` で更新する。
-     * 再サインインが必要な状態（トークンなし／リフレッシュ失敗）では null。
+     * 取得できなければ理由を問わず null（サインイン画面の「素通りできるか」の判定用）。
+     * 失敗の理由で振る舞いを変える呼び出し側は [authorize] を使う。
      *
      * [forceRefresh] は 401 を受けた呼び出し側から使う（期限内でも失効することがある）。
      */
-    override suspend fun accessToken(forceRefresh: Boolean): String? {
-        val saved = tokens.load() ?: return null
-        if (saved.authVersion != CURRENT_AUTH_VERSION) {
-            // 現在のチャネル権限セットと違う古い access token を使わず再同意へ送る。
-            tokens.clear()
-            return null
-        }
-        if (!forceRefresh && saved.expiresAt - REFRESH_MARGIN_MS > now()) return saved.accessToken
+    override suspend fun accessToken(forceRefresh: Boolean): String? = authorize(forceRefresh).getOrNull()
 
-        val refreshToken = saved.refreshToken ?: return null
-        val body =
-            postForm(
-                tokenUrl(),
-                mapOf(
-                    "grant_type" to "refresh_token",
-                    "client_id" to clientId,
-                    "refresh_token" to refreshToken,
-                    "scope" to TEAMS_SCOPES,
-                ),
-            ).getOrElse { return null }
+    /**
+     * Graph 呼び出しに使うアクセストークン。[accessToken] と違い**失敗の種類を区別して返す**。
+     *
+     * - [SignInRequiredException] … 人の再サインインが必要（トークンなし／リフレッシュトークン失効／同意の取り直し）
+     * - それ以外の [IOException] … 通信断や認証サーバの一時障害。**保存済みトークンは残る**ので次の呼び出しでまた試せる
+     *
+     * グラスの Wi-Fi は頻繁に切れる。更新のタイミングで通信が落ちただけの状態を「未サインイン」と
+     * 報告すると、有効なリフレッシュトークンを持ったままデバイスコードの再入力へ送ってしまう。
+     *
+     * [rejected] は 401 を受けたトークン。別の呼び出しが先に更新を済ませていればそれを使い、二重に更新しない。
+     */
+    suspend fun authorize(
+        forceRefresh: Boolean = false,
+        rejected: String? = null,
+    ): Result<String> =
+        refreshLock.withLock {
+            val saved = tokens.load() ?: return@withLock signInRequired()
+            if (saved.authVersion != CURRENT_AUTH_VERSION) {
+                // 現在のチャネル権限セットと違う古い access token を使わず再同意へ送る。
+                tokens.clear()
+                return@withLock signInRequired()
+            }
+            val fresh = saved.expiresAt - REFRESH_MARGIN_MS > now()
+            val alreadyReplaced = rejected != null && saved.accessToken != rejected
+            if (fresh && (!forceRefresh || alreadyReplaced)) return@withLock Result.success(saved.accessToken)
 
-        if (JsonLite.string(body, "access_token") == null) {
+            val refreshToken = saved.refreshToken ?: return@withLock signInRequired()
+            val body =
+                postForm(
+                    tokenUrl(),
+                    mapOf(
+                        "grant_type" to "refresh_token",
+                        "client_id" to clientId,
+                        "refresh_token" to refreshToken,
+                        "scope" to TEAMS_SCOPES,
+                    ),
+                ).getOrElse { return@withLock Result.failure(it) }
+
+            val access = JsonLite.string(body, "access_token")?.takeIf { it.isNotBlank() }
+            if (access != null) return@withLock Result.success(store(body, access).accessToken)
+
             val error = JsonLite.string(body, "error")
             Log.w(TAG, "トークン更新に失敗: $error") // 値そのものは出さない
-            // リフレッシュトークンが失効している。持っていても無意味なので消して再サインインへ促す。
-            if (error == "invalid_grant") tokens.clear()
-            return null
+            when {
+                // リフレッシュトークンが失効している。持っていても無意味なので消して再サインインへ促す。
+                error == "invalid_grant" -> {
+                    tokens.clear()
+                    signInRequired()
+                }
+                // `error` を持たない応答（5xx の HTML など）と一時障害は、トークンを保ったまま再試行へ。
+                error == null || error in TRANSIENT_OAUTH_ERRORS -> Result.failure(IOException("認証サーバに接続できません"))
+                else -> signInRequired()
+            }
         }
-        return store(body).accessToken
-    }
 
-    /** `token` 応答を保存する。`refresh_token` が省略された応答では既存のものを保つ。 */
-    private fun store(body: String): Tokens {
+    private fun signInRequired(): Result<String> = Result.failure(SignInRequiredException("Teams 未サインイン"))
+
+    /**
+     * `token` 応答を保存する。`refresh_token` が省略された応答では既存のものを保つ。
+     * [accessToken] は呼び出し側が空でないと確かめた値（空を保存すると未サインインへ倒れる）。
+     */
+    private fun store(
+        body: String,
+        accessToken: String,
+    ): Tokens {
         val saved =
             Tokens(
-                accessToken = JsonLite.string(body, "access_token").orEmpty(),
+                accessToken = accessToken,
                 refreshToken = JsonLite.string(body, "refresh_token") ?: tokens.load()?.refreshToken,
                 expiresAt = now() + (JsonLite.number(body, "expires_in") ?: DEFAULT_EXPIRES_IN_SEC) * 1_000L,
             )

@@ -11,6 +11,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -380,6 +381,21 @@ class TeamsClientListMessagesTest {
 
             assertTrue(result.exceptionOrNull() is SignInRequiredException)
             assertEquals(0, server.requestCount)
+        }
+
+    @Test
+    fun networkLossWhileRefreshingAnExpiredTokenIsAConnectionErrorNotASignOut() =
+        runTest {
+            val store = InMemoryTokenStore(Tokens("at-old", "rt-1", expiresAt = clock - 1))
+            val teams = client(store)
+            server.shutdown()
+
+            val error = teams.listMessages().exceptionOrNull()
+
+            // ロビーは「再試行」を出すだけで、サインイン画面へ自動遷移しない。
+            assertFalse(error is SignInRequiredException)
+            assertEquals("ネットワークに接続できません", error?.message)
+            assertEquals("rt-1", store.load()?.refreshToken)
         }
 
     @Test
