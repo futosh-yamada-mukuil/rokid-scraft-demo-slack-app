@@ -6,6 +6,8 @@
  *
  * Environment:
  *   SLACK_E2E_LATENCY_MS  simulated round trip per Slack call (default 150)
+ *   SLACK_E2E_PORT        relay port (default: any free port). 8787 lets the slackEmulator APK
+ *                         reach it through `adb reverse tcp:8787 tcp:8787` without a real Slack.
  *   SLACK_E2E_TIMING      JSON for the relay's polling cadence, e.g. {"freshMs":3000}
  *   SLACK_E2E_API_SRC     directory holding app.ts, to measure another revision of the relay
  *
@@ -42,7 +44,10 @@ const app = await createApp({
     ? JSON.parse(process.env.SLACK_E2E_TIMING)
     : undefined,
 });
-const relay = await app.listen({ host: "127.0.0.1", port: 0 });
+const relay = await app.listen({
+  host: "127.0.0.1",
+  port: Number(process.env.SLACK_E2E_PORT ?? 0),
+});
 
 const control = createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", "http://127.0.0.1");
