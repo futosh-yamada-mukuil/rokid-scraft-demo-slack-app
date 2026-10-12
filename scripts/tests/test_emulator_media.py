@@ -21,6 +21,24 @@ class EmulatorMediaTest(unittest.TestCase):
             media.select_camera("webcam2", listing)
         self.assertEqual("emulated", media.select_camera("emulated", ""))
 
+    def test_camera_selection_reads_the_listing_of_newer_emulators(self):
+        # Emulator 37 prints the device name first; the webcamN label follows "by label as".
+        listing = (
+            "List of web cameras connected to the computer:\n"
+            " Camera '\u200eiPhoneのカメラ' can be specified by label as 'webcam0' or by id as '36A8FEC6-0001' and will use pixel format 'NV12'\n"
+            " Camera 'FaceTime HDカメラ' can be specified by label as 'webcam1' or by id as '47B4B64B-0002' and will use pixel format 'NV12'\n"
+        )
+        self.assertEqual(["webcam0", "webcam1"], media.listed_cameras(listing))
+        self.assertEqual("webcam0", media.select_camera("auto", listing))
+        self.assertEqual("webcam1", media.select_camera("webcam1", listing))
+        with self.assertRaises(ValueError):
+            media.select_camera("webcam2", listing)
+        # A device that happens to be named like a label must not be taken for one.
+        named = " Camera 'webcam7' can be specified by label as 'webcam0' or by id as 'X' and will use pixel format 'NV12'\n"
+        self.assertEqual(["webcam0"], media.listed_cameras(named))
+        with self.assertRaises(ValueError):
+            media.select_camera("auto", "List of web cameras connected to the computer:\n")
+
     def test_configuration_preserves_other_settings_and_user_data(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
