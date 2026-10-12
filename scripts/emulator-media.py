@@ -8,10 +8,25 @@ import subprocess
 from pathlib import Path
 
 
+def listed_cameras(listing: str) -> list[str]:
+    """webcamN labels from `emulator -webcam-list`, in listed order.
+
+    The format depends on the emulator version; newer ones print the device name first:
+      old: Camera 'webcam0' is connected to device '...'
+      new: Camera 'FaceTime HD Camera' can be specified by label as 'webcam0' or by id as '...'
+    """
+    cameras = []
+    for line in listing.splitlines():
+        match = re.search(r"by label as ['\"](webcam\d+)['\"]", line) or re.search(r"Camera ['\"](webcam\d+)['\"]", line)
+        if match:
+            cameras.append(match.group(1))
+    return list(dict.fromkeys(cameras))
+
+
 def select_camera(requested: str, listing: str) -> str:
     if requested in ("emulated", "none"):
         return requested
-    cameras = list(dict.fromkeys(re.findall(r"Camera ['\"](webcam\d+)['\"]", listing)))
+    cameras = listed_cameras(listing)
     if requested == "auto":
         if cameras:
             return cameras[0]
